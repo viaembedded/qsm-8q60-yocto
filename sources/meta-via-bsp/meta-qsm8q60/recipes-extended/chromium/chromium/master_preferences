@@ -1,0 +1,8 @@
+{
+  "distribution" : {
+    "suppress_first_run_bubble": true
+  },
+  "first_run_tabs": [
+     "http://new_tab_page"
+  ]
+}

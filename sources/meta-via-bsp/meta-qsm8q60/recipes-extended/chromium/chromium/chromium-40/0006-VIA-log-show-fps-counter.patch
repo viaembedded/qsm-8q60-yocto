@@ -1,0 +1,202 @@
+diff -rc a/cc/base/switches.cc b/cc/base/switches.cc
+*** a/cc/base/switches.cc	2015-01-22 04:28:14.000000000 +0800
+--- b/cc/base/switches.cc	2015-05-21 14:42:01.319988746 +0800
+***************
+*** 76,81 ****
+--- 76,82 ----
+  // usage. If you also use --vmodule="head*=1" then FPS will also be output to
+  // the console log.
+  const char kShowFPSCounter[] = "show-fps-counter";
++ const char kLOGShowFPSCounter[] = "log-show-fps-counter";
+  const char kUIShowFPSCounter[] = "ui-show-fps-counter";
+  
+  // Renders a border that represents the bounding box for the layer's animation.
+diff -rc a/cc/base/switches.h b/cc/base/switches.h
+*** a/cc/base/switches.h	2015-01-22 04:28:14.000000000 +0800
+--- b/cc/base/switches.h	2015-05-21 14:39:20.399996981 +0800
+***************
+*** 42,47 ****
+--- 42,48 ----
+  CC_EXPORT extern const char kUIShowCompositedLayerBorders[];
+  CC_EXPORT extern const char kShowFPSCounter[];
+  CC_EXPORT extern const char kUIShowFPSCounter[];
++ CC_EXPORT extern const char kLOGShowFPSCounter[];
+  CC_EXPORT extern const char kShowLayerAnimationBounds[];
+  CC_EXPORT extern const char kUIShowLayerAnimationBounds[];
+  CC_EXPORT extern const char kShowPropertyChangedRects[];
+diff -rc a/cc/debug/layer_tree_debug_state.cc b/cc/debug/layer_tree_debug_state.cc
+*** a/cc/debug/layer_tree_debug_state.cc	2015-01-22 04:05:38.000000000 +0800
+--- b/cc/debug/layer_tree_debug_state.cc	2015-05-21 16:22:12.512711796 +0800
+***************
+*** 11,16 ****
+--- 11,17 ----
+  // IMPORTANT: new fields must be added to Equal() and Unite()
+  LayerTreeDebugState::LayerTreeDebugState()
+      : show_fps_counter(false),
++       log_show_fps_counter(false),
+        show_debug_borders(false),
+        continuous_painting(false),
+        show_paint_rects(false),
+***************
+*** 41,47 ****
+  }
+  
+  bool LayerTreeDebugState::ShowHudInfo() const {
+!   return show_fps_counter || continuous_painting ||
+           ShowHudRects();
+  }
+  
+--- 42,48 ----
+  }
+  
+  bool LayerTreeDebugState::ShowHudInfo() const {
+!   return show_fps_counter || continuous_painting || log_show_fps_counter ||
+           ShowHudRects();
+  }
+  
+***************
+*** 55,67 ****
+  }
+  
+  bool LayerTreeDebugState::ShowMemoryStats() const {
+!   return show_fps_counter || continuous_painting;
+  }
+  
+  bool LayerTreeDebugState::Equal(const LayerTreeDebugState& a,
+                                  const LayerTreeDebugState& b) {
+    return (
+        a.show_fps_counter == b.show_fps_counter &&
+        a.show_debug_borders == b.show_debug_borders &&
+        a.continuous_painting == b.continuous_painting &&
+        a.show_paint_rects == b.show_paint_rects &&
+--- 56,69 ----
+  }
+  
+  bool LayerTreeDebugState::ShowMemoryStats() const {
+!   return show_fps_counter || continuous_painting || log_show_fps_counter;
+  }
+  
+  bool LayerTreeDebugState::Equal(const LayerTreeDebugState& a,
+                                  const LayerTreeDebugState& b) {
+    return (
+        a.show_fps_counter == b.show_fps_counter &&
++       a.log_show_fps_counter == b.log_show_fps_counter &&
+        a.show_debug_borders == b.show_debug_borders &&
+        a.continuous_painting == b.continuous_painting &&
+        a.show_paint_rects == b.show_paint_rects &&
+***************
+*** 88,93 ****
+--- 90,96 ----
+    LayerTreeDebugState r(a);
+  
+    r.show_fps_counter |= b.show_fps_counter;
++   r.log_show_fps_counter |= b.log_show_fps_counter;
+    r.show_debug_borders |= b.show_debug_borders;
+    r.continuous_painting |= b.continuous_painting;
+  
+diff -rc a/cc/debug/layer_tree_debug_state.h b/cc/debug/layer_tree_debug_state.h
+*** a/cc/debug/layer_tree_debug_state.h	2015-01-22 04:05:38.000000000 +0800
+--- b/cc/debug/layer_tree_debug_state.h	2015-05-21 14:55:30.071947358 +0800
+***************
+*** 16,21 ****
+--- 16,22 ----
+    ~LayerTreeDebugState();
+  
+    bool show_fps_counter;
++   bool log_show_fps_counter;
+    bool show_debug_borders;
+    bool continuous_painting;
+  
+diff -rc a/cc/layers/heads_up_display_layer_impl.cc b/cc/layers/heads_up_display_layer_impl.cc
+*** a/cc/layers/heads_up_display_layer_impl.cc	2015-01-22 04:28:14.000000000 +0800
+--- b/cc/layers/heads_up_display_layer_impl.cc	2015-05-21 17:14:31.812778526 +0800
+***************
+*** 136,141 ****
+--- 136,146 ----
+    if (!resources_.back()->id())
+      return;
+  
++   const LayerTreeDebugState& debug_state = layer_tree_impl()->debug_state();
++   if (debug_state.log_show_fps_counter) {
++       return;
++   }
++ 
+    SharedQuadState* shared_quad_state =
+        render_pass->CreateAndAppendSharedQuadState();
+    PopulateSharedQuadState(shared_quad_state);
+***************
+*** 169,174 ****
+--- 174,185 ----
+    if (draw_mode == DRAW_MODE_RESOURCELESS_SOFTWARE || !resources_.back()->id())
+      return;
+  
++   const LayerTreeDebugState& debug_state = layer_tree_impl()->debug_state();
++   if (debug_state.log_show_fps_counter) {
++       UpdateHudContents();
++       return;
++   }
++ 
+    SkISize canvas_size;
+    if (hud_canvas_)
+      canvas_size = hud_canvas_->getDeviceSize();
+***************
+*** 222,227 ****
+--- 233,246 ----
+    if (base::TimeDelta(now - time_of_last_graph_update_).InSecondsF() > 0.25f) {
+      time_of_last_graph_update_ = now;
+  
++     if (debug_state.log_show_fps_counter) {
++       FrameRateCounter* fps_counter = layer_tree_impl()->frame_rate_counter();
++       fps_graph_.value = fps_counter->GetAverageFPS();
++       const std::string value_text =
++       base::StringPrintf("FPS:%5.1f", fps_graph_.value);
++       VLOG(-2) << value_text;
++       return;
++     }
+      if (debug_state.show_fps_counter) {
+        FrameRateCounter* fps_counter = layer_tree_impl()->frame_rate_counter();
+        fps_graph_.value = fps_counter->GetAverageFPS();
+***************
+*** 269,275 ****
+    if (debug_state.continuous_painting) {
+      area = DrawPaintTimeDisplay(
+          canvas, layer_tree_impl()->paint_time_counter(), 0, 0);
+!   } else if (debug_state.show_fps_counter) {
+      // Don't show the FPS display when continuous painting is enabled, because
+      // it would show misleading numbers.
+      area =
+--- 288,294 ----
+    if (debug_state.continuous_painting) {
+      area = DrawPaintTimeDisplay(
+          canvas, layer_tree_impl()->paint_time_counter(), 0, 0);
+!   } else if (debug_state.show_fps_counter || debug_state.log_show_fps_counter) {
+      // Don't show the FPS display when continuous painting is enabled, because
+      // it would show misleading numbers.
+      area =
+diff -rc a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+*** a/content/browser/renderer_host/render_process_host_impl.cc	2015-01-22 04:28:16.000000000 +0800
+--- b/content/browser/renderer_host/render_process_host_impl.cc	2015-05-21 16:18:44.992707385 +0800
+***************
+*** 1203,1208 ****
+--- 1203,1209 ----
+      cc::switches::kMaxUnusedResourceMemoryUsagePercentage,
+      cc::switches::kShowCompositedLayerBorders,
+      cc::switches::kShowFPSCounter,
++     cc::switches::kLOGShowFPSCounter,
+      cc::switches::kShowLayerAnimationBounds,
+      cc::switches::kShowNonOccludingRects,
+      cc::switches::kShowOccludingRects,
+diff -rc a/content/renderer/gpu/render_widget_compositor.cc b/content/renderer/gpu/render_widget_compositor.cc
+*** a/content/renderer/gpu/render_widget_compositor.cc	2015-01-22 04:28:17.000000000 +0800
+--- b/content/renderer/gpu/render_widget_compositor.cc	2015-05-21 14:54:41.251949856 +0800
+***************
+*** 283,288 ****
+--- 283,290 ----
+        cmd->HasSwitch(cc::switches::kShowCompositedLayerBorders);
+    settings.initial_debug_state.show_fps_counter =
+        cmd->HasSwitch(cc::switches::kShowFPSCounter);
++   settings.initial_debug_state.log_show_fps_counter =
++       cmd->HasSwitch(cc::switches::kLOGShowFPSCounter);
+    settings.initial_debug_state.show_layer_animation_bounds_rects =
+        cmd->HasSwitch(cc::switches::kShowLayerAnimationBounds);
+    settings.initial_debug_state.show_paint_rects =

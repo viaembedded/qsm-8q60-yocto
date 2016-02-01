@@ -1,0 +1,123 @@
+diff --git a/gst/isomp4/isomp4-plugin.c b/gst/isomp4/isomp4-plugin.c
+index 1e26d30..700d23f 100644
+--- a/gst/isomp4/isomp4-plugin.c
++++ b/gst/isomp4/isomp4-plugin.c
+@@ -52,7 +52,7 @@ plugin_init (GstPlugin * plugin)
+       gst_tag_merge_use_first);
+ 
+   if (!gst_element_register (plugin, "qtdemux",
+-          GST_RANK_PRIMARY, GST_TYPE_QTDEMUX))
++          GST_RANK_PRIMARY + 2, GST_TYPE_QTDEMUX))
+     return FALSE;
+ 
+   if (!gst_element_register (plugin, "rtpxqtdepay",
+diff --git a/gst/isomp4/qtdemux.c b/gst/isomp4/qtdemux.c
+index 14d5413..44c3742 100644
+--- a/gst/isomp4/qtdemux.c
++++ b/gst/isomp4/qtdemux.c
+@@ -73,6 +73,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++static gboolean IS_FIRST = FALSE;
++static gboolean change_codec_data = FALSE;
++
+ #ifdef HAVE_ZLIB
+ # include <zlib.h>
+ #endif
+@@ -3571,6 +3574,22 @@ gst_qtdemux_process_buffer (GstQTDemux * qtdemux, QtDemuxStream * stream,
+   return buf;
+ }
+ 
++/*Add by AdamZhu: for some quicktime movies with compress header need change format to link vpudec plugin*/
++static void changeFormat(GstBuffer * buf)
++{
++ char *data= GST_BUFFER_DATA(buf);
++ int size = GST_BUFFER_SIZE(buf);
++ int len = 0;
++ int num = 0;
++ //fprintf(stderr,"Change format !!!\n"); 
++ for(; num <size; num+=4+len){
++  len = (data[num]&0x000000FF)<<24 |(data[num+1]&0x000000FF)<<16 | (data[num+2]&0x000000FF)<<8 | (data[num+3]&0x000000FF);
++  data[num] = data[num+1] = data[num+2] = 0;
++  data[num+3] = 1;
++ }
++ 
++ data = NULL;
++}
+ /* Sets a buffer's attributes properly and pushes it downstream.
+  * Also checks for additional actions and custom processing that may
+  * need to be done first.
+@@ -3582,7 +3601,7 @@ gst_qtdemux_decorate_and_push_buffer (GstQTDemux * qtdemux,
+     guint64 byte_position)
+ {
+   GstFlowReturn ret = GST_FLOW_OK;
+-
++  char *data_ptr = NULL;
+   if (G_UNLIKELY (stream->fourcc == FOURCC_rtsp)) {
+     gchar *url;
+ 
+@@ -3684,6 +3703,54 @@ gst_qtdemux_decorate_and_push_buffer (GstQTDemux * qtdemux,
+       "Pushing buffer with time %" GST_TIME_FORMAT ", duration %"
+       GST_TIME_FORMAT " on pad %s", GST_TIME_ARGS (GST_BUFFER_TIMESTAMP (buf)),
+       GST_TIME_ARGS (GST_BUFFER_DURATION (buf)), GST_PAD_NAME (stream->pad));
++ 
++ if(IS_FIRST && (stream->subtype == FOURCC_vide)){
++    GstStructure *structure;
++    const GValue *value = NULL;
++    structure = gst_caps_get_structure (stream->caps, 0);
++    if(value = gst_structure_get_value (structure, "codec_data")){
++      GstBuffer *codec_data = gst_value_get_buffer (value);
++      guint8   *data;
++      guint     size;
++      int i ;
++      int sps_size;
++      int pps_size;
++      
++      size = GST_BUFFER_SIZE (codec_data);
++      data = GST_BUFFER_DATA (codec_data);
++
++     if(data[0] && size>4){
++        sps_size = data[7];
++        pps_size = data[7 + sps_size + 3];
++         data[0] = 0x00;
++         data[1] = 0x00;
++         data[2] = 0x00;
++         data[3] = 0x01;
++
++        for( i = 0; i<sps_size ; i++)
++         data[4+i] = data[8+i];
++         data[4 + sps_size] = 0x00;
++         data[5 + sps_size] = 0x00;
++         data[6 + sps_size] = 0x00;
++         data[7 + sps_size] = 0x01;
++        for( i = 1; i <= pps_size; i++)
++         data[7+sps_size+i]=data[7+sps_size+3+i];
++
++        GST_BUFFER_SIZE (codec_data) = 8 + sps_size + pps_size;
++        size = GST_BUFFER_SIZE (codec_data);      
++        change_codec_data = TRUE;
++      }
++
++
++       IS_FIRST = FALSE;
++     data = NULL;
++     codec_data = NULL;
++    }
++
++   }
++
++ if ((stream->subtype == FOURCC_vide) && change_codec_data)  
++   changeFormat(buf);
+ 
+   ret = gst_pad_push (stream->pad, buf);
+ 
+@@ -3813,6 +3880,8 @@ gst_qtdemux_loop (GstPad * pad)
+     case QTDEMUX_STATE_INITIAL:
+     case QTDEMUX_STATE_HEADER:
+       ret = gst_qtdemux_loop_state_header (qtdemux);
++       IS_FIRST = TRUE;
++      change_codec_data = FALSE;
+       break;
+     case QTDEMUX_STATE_MOVIE:
+       ret = gst_qtdemux_loop_state_movie (qtdemux);

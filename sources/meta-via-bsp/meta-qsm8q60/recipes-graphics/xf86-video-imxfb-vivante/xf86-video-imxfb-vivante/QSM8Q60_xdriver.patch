@@ -1,0 +1,189 @@
+diff -urN a/EXA/src/vivante_fbdev/imx_display.c b/EXA/src/vivante_fbdev/imx_display.c
+--- a/EXA/src/vivante_fbdev/imx_display.c	2015-10-22 15:59:56.628018783 +0800
++++ b/EXA/src/vivante_fbdev/imx_display.c	2015-10-22 16:02:43.350518042 +0800
+@@ -227,7 +227,7 @@
+ 
+ static const char* imxSysnodeNameMonitorInfoArray[] =
+ {
+-	"/sys/devices/platform/mxc_ddc.0/",
++	"/sys/devices/soc0/soc.1/20e0000.hdmi_video/",
+ 	"/sys/devices/platform/sii902x.0/"
+ };
+ static const int imxSysnodeNameMonitorInfoCount =
+@@ -237,7 +237,7 @@
+ static xf86OutputStatus
+ imxDisplayGetCableState(int scrnIndex, const char* fbId)
+ {
+-#if 1
++#if 0
+ 	return XF86OutputStatusConnected;
+ #else
+ 	/* Loop through each sysnode entry looking for the cable state */
+@@ -296,7 +296,7 @@
+ 
+ 		} else if (0 == strcmp(strCableState, "plugout")) {
+ 
+-#if 0
++#if 1 
+ 			return XF86OutputStatusDisconnected;
+ #else
+ 			return XF86OutputStatusUnknown;
+@@ -2001,7 +2001,7 @@
+ static void imxSetPreferFlag(ScrnInfoPtr pScrn, DisplayModePtr mode)
+ {
+     ImxPtr fPtr = IMXPTR(pScrn);
+-    if(strcmp(mode->name, fPtr->bootupVideoMode) == 0)
++    if(strcmp(mode->name+1, fPtr->bootupVideoMode+1) == 0)
+     {
+         mode->type |= M_T_PREFERRED;
+     }
+@@ -2072,6 +2072,8 @@
+     ImxPtr fPtr = IMXPTR(pScrn);
+     ImxDisplayPtr imxDispPtr = IMXDISPLAYPTR(fPtr);
+     int rc = -1;
++    struct fb_var_screeninfo fbVarScreenInfo;
++    Bool savedVarScreenInfo = FALSE;
+ 
+     suggestMode[0] = 0;
+ 
+@@ -2102,7 +2104,16 @@
+             sysnodeName, strerror(errno));
+         goto errorGetModes;
+     }
++	// fb var save for backup
++    /* Query the FB variable screen info */
++    if (0 != ioctl(fdDev, FBIOGET_VSCREENINFO, &fbVarScreenInfo)) {
+ 
++	xf86DrvMsg(pScrn->scrnIndex, X_ERROR,
++		"unable to get FB VSCREENINFO for current mode: %s\n",
++		strerror(errno));
++	goto errorGetModes;
++    }
++    	savedVarScreenInfo = TRUE;
+     // do not use pScrn->currentMode to check last mode: volatile
+ 
+     /* Turn on frame buffer blanking. */
+@@ -2172,6 +2183,21 @@
+     if (NULL != fpModes) {
+         fclose(fpModes);
+     }
++	/* Restore FB back to the current mode */
++	if (savedVarScreenInfo) {
++
++		if (0 != ioctl(fdDev, FBIOPUT_VSCREENINFO, &fbVarScreenInfo)) {
++	
++			xf86DrvMsg(pScrn->scrnIndex, X_ERROR,
++				"unable to restore FB VSCREENINFO: %s\n",
++				strerror(errno));
++		}
++	}
++	/* Turn off frame buffer blanking */
++//	if (-1 != fdDev) {
++//
++//		ioctl(fdDev, FBIOBLANK, FB_BLANK_UNBLANK);
++//	}
+ 
+     /* Remove any duplicate modes found. */
+     modesList = xf86PruneDuplicateModes(modesList);
+@@ -2184,14 +2210,20 @@
+     /* find a good mode to return */
+     if(rc == 0) {
+         // 1. same mode name as previous (xrandr will skip?)
+-        // 2. same resolution as previous
+-        // 3. largest resolution
++	// 2. boot up prefered 
++        // 3. same resolution as previous
++        // 4. largest resolution
+         DisplayModePtr pSameNameMode = NULL;
+         DisplayModePtr pSameSizeMode = NULL;
+         DisplayModePtr pLargestSizeMode = imxDispPtr->fbModesList;
+         DisplayModePtr p = imxDispPtr->fbModesList;
++        DisplayModePtr p1 = imxDispPtr->fbModesList;
+ 
+-        while (p) {
++	// get boot up prefered mode
++	DisplayModePtr pBootupPreferedMode = NULL;
++	pBootupPreferedMode = imxDisplayGetMonitorPreferredMode(p1);
++        
++	while (p) {
+             if(fPtr->lastVideoMode) {
+                 // Use the previous mode. Set video mode here
+                 if(fPtr->lastVideoMode->name != NULL && strcmp(p->name, fPtr->lastVideoMode->name) == 0) {
+@@ -2202,10 +2234,11 @@
+ 
+                 // is the mode same size as previous one?
+                 if(p->HDisplay == fPtr->lastVideoMode->HDisplay &&
+-                    p->VDisplay == fPtr->lastVideoMode->VDisplay)
++                    p->VDisplay == fPtr->lastVideoMode->VDisplay) 
++			
+                     pSameSizeMode = p;
++			
+             }
+-
+             // is this mode largest size?
+             if(p->HDisplay > pLargestSizeMode->HDisplay)
+                 pLargestSizeMode = p;
+@@ -2215,6 +2248,8 @@
+ 
+         if(pSameNameMode)
+             strcpy(suggestMode, pSameNameMode->name);
++        else if(pBootupPreferedMode)
++            strcpy(suggestMode, pBootupPreferedMode->name);
+         else if(pSameSizeMode)
+             strcpy(suggestMode, pSameSizeMode->name);
+         else //pLargestSizeMode != NULL
+@@ -2297,3 +2332,4 @@
+     return TRUE;
+ }
+ 
++
+diff -urN a/EXA/src/vivante_gal/vivante_gal_surface.c b/EXA/src/vivante_gal/vivante_gal_surface.c
+--- a/EXA/src/vivante_gal/vivante_gal_surface.c	2015-10-22 15:59:56.588020675 +0800
++++ b/EXA/src/vivante_gal/vivante_gal_surface.c	2015-10-22 16:02:43.350518042 +0800
+@@ -548,8 +548,13 @@
+                                             cacheable?gcvALLOC_FLAG_CACHEABLE|gcvALLOC_FLAG_CONTIGUOUS:gcvALLOC_FLAG_NONE, 
+                                             surftype, (gctUINT32 *)&surf->mVideoNode.mNode);
+         if (status != gcvSTATUS_OK) {
+-            TRACE_ERROR("Unable to allocate video node\n");
+-            TRACE_EXIT(FALSE);
++            status = AllocVideoNode(gpuctx->mDriver->mHal, &surf->mVideoNode.mSizeInBytes, &surf->mVideoNode.mPool,
++                                            cacheable?gcvALLOC_FLAG_CACHEABLE:gcvALLOC_FLAG_NONE,
++                                            surftype, (gctUINT32 *)&surf->mVideoNode.mNode);
++            if (status != gcvSTATUS_OK){
++                TRACE_ERROR("Unable to allocate video node\n");
++                TRACE_EXIT(FALSE);
++            }
+         }
+ 
+         status = LockVideoNode(gpuctx->mDriver->mHal, surf->mVideoNode.mNode, cacheable, &surf->mVideoNode.mPhysicalAddr, &surf->mVideoNode.mLogicalAddr);
+diff -urN a/util/autohdmi/hdmi.c b/util/autohdmi/hdmi.c
+--- a/util/autohdmi/hdmi.c	2015-10-22 15:59:56.638019866 +0800
++++ b/util/autohdmi/hdmi.c	2015-10-22 16:02:43.350518042 +0800
+@@ -70,7 +70,6 @@
+             }
+         }
+     }
+-
+     return 0;
+ }
+ 
+@@ -364,11 +363,16 @@
+ 
+     // construct command
+     char setvideomode[256];
+-    sprintf(setvideomode, "xrandr --output \'%s\' --mode \'%s\'", output, mode);
+-
+-    // execute command
++    // first xrandr --output off
++    sprintf(setvideomode, "xrandr --output \'%s\' --off", output); 
+     int rc = system(setvideomode);
++		
++    sprintf(setvideomode, "xrandr --output \'%s\' --mode \'%s\'", output,mode); 
++    // execute command
++    rc = system(setvideomode);
++
+     return rc;
++
+ }
+ 
+ int main(int argc, const char **argv)

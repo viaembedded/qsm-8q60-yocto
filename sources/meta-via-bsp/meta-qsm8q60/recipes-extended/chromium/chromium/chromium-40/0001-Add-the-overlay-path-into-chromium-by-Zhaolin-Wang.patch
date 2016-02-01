@@ -1,0 +1,1386 @@
+From cff5c5e42b87b6d7240c9058d74f99e17644d98a Mon Sep 17 00:00:00 2001
+From: AdamZhu <AdamZhu@viatech.com.cn>
+Date: Tue, 23 Jun 2015 18:31:53 +0800
+Subject: [PATCH] Add the overlay path into chromium by Zhaolin Wang
+
+---
+ cc/layers/video_layer_impl.cc                      |  34 +
+ cc/layers/video_layer_impl.h                       |  11 +
+ .../gpu/media/imxvpu_video_decode_accelerator.cc   | 103 ++-
+ .../gpu/media/imxvpu_video_decode_accelerator.h    |   7 +
+ content/common/gpu/media/imxvpucodec.h             | 116 ++++
+ content/common/gpu/media/imxvpucodec_fslwrapper.c  | 771 ++++++++++++++++++++-
+ media/filters/video_renderer_impl.cc               |  37 +-
+ media/filters/video_renderer_impl.h                |   7 +-
+ 8 files changed, 1071 insertions(+), 15 deletions(-)
+
+diff --git a/cc/layers/video_layer_impl.cc b/cc/layers/video_layer_impl.cc
+index 8251a09..0e3406a 100644
+--- a/cc/layers/video_layer_impl.cc
++++ b/cc/layers/video_layer_impl.cc
+@@ -22,6 +22,8 @@
+ #include "cc/quads/solid_color_draw_quad.h"
+ #endif  // defined(VIDEO_HOLE)
+ 
++#include <sys/shm.h>
++
+ namespace cc {
+ 
+ // static
+@@ -44,6 +46,17 @@ VideoLayerImpl::VideoLayerImpl(LayerTreeImpl* tree_impl,
+     : LayerImpl(tree_impl, id),
+       frame_(nullptr),
+       video_rotation_(video_rotation) {
++
++  gfx::Size rotated_size = content_bounds();
++  gfx::Rect quad_rect(rotated_size);
++
++  shmid = shmget((key_t)1234, sizeof(struct shared_info_), 0666|IPC_CREAT);  
++  if(shmid == -1)  
++      fprintf(stderr, "shmget failed\n"); 
++   shm = shmat(shmid, 0, 0);  
++   if(shm == (void*)-1)  
++      fprintf(stderr, "shmat failed\n");  
++        
+ }
+ 
+ VideoLayerImpl::~VideoLayerImpl() {
+@@ -53,6 +66,13 @@ VideoLayerImpl::~VideoLayerImpl() {
+     // on the VideoFrameProviderClientImpl, but we stop when the first
+     // LayerImpl (the one on the pending tree) is destroyed since we know
+     // the main thread is blocked for this commit.
++    if(shmdt(shm) == -1)  
++    {  
++        fprintf(stderr, "shmdt failed\n");  
++    } 
++    shmid = -1;
++    shm = NULL;
++	
+     DCHECK(layer_tree_impl()->proxy()->IsImplThread());
+     DCHECK(layer_tree_impl()->proxy()->IsMainThreadBlocked());
+     provider_client_impl_->Stop();
+@@ -193,6 +213,20 @@ void VideoLayerImpl::AppendQuads(RenderPass* render_pass,
+   const float tex_y_offset =
+       static_cast<float>(visible_rect.y()) / coded_size.height();
+ 
++ /*store pos info according viewport*/
++ gfx::RectF float_rect(static_cast<float>(quad_rect.x()), static_cast<float>(quad_rect.y()), 
++ 	static_cast<float>(quad_rect.width()), static_cast<float>(quad_rect.height()));
++ screen_space_transform().TransformRect(&float_rect);
++ shared_info *pos_info = (shared_info *)shm;
++ pos_info->x = static_cast<int>(float_rect.x());
++ pos_info->y = static_cast<int>(float_rect.y());
++ pos_info->width = static_cast<int>(float_rect.width());
++ pos_info->height = static_cast<int>(float_rect.height());
++//fprintf(stderr,"quads: %f,%f,%f,%f\n", float_rect.width(), float_rect.height(),
++// 	float_rect.x(), float_rect.y());
++// fprintf(stderr,"quads1: %d,%d,%d,%d \n", pos_info.x, pos_info.y,pos_info.width, pos_info.height);
++ //fprintf(stderr, "%s \n", screen_space_transform().ToString().c_str());
++
+   switch (frame_resource_type_) {
+     // TODO(danakj): Remove this, hide it in the hardware path.
+     case VideoFrameExternalResources::SOFTWARE_RESOURCE: {
+diff --git a/cc/layers/video_layer_impl.h b/cc/layers/video_layer_impl.h
+index 1843ec7..6c06d36 100644
+--- a/cc/layers/video_layer_impl.h
++++ b/cc/layers/video_layer_impl.h
+@@ -21,6 +21,13 @@ namespace cc {
+ class VideoFrameProvider;
+ class VideoFrameProviderClientImpl;
+ 
++typedef struct shared_info_{
++    int x;
++    int y;
++    int width;
++    int height;
++}shared_info;
++
+ class CC_EXPORT VideoLayerImpl : public LayerImpl {
+  public:
+   static scoped_ptr<VideoLayerImpl> Create(LayerTreeImpl* tree_impl,
+@@ -71,6 +78,10 @@ class CC_EXPORT VideoLayerImpl : public LayerImpl {
+   // Called once for each software resource.
+   ReleaseCallbackImpl software_release_callback_;
+ 
++  /*store info for video position in viewport*/
++  int shmid;
++  void *shm;
++
+   DISALLOW_COPY_AND_ASSIGN(VideoLayerImpl);
+ };
+ 
+diff --git a/content/common/gpu/media/imxvpu_video_decode_accelerator.cc b/content/common/gpu/media/imxvpu_video_decode_accelerator.cc
+index cfa80be..0923606 100644
+--- a/content/common/gpu/media/imxvpu_video_decode_accelerator.cc
++++ b/content/common/gpu/media/imxvpu_video_decode_accelerator.cc
+@@ -5,7 +5,9 @@
+ #include "content/common/gpu/media/imxvpu_video_decode_accelerator.h"
+ #include "ui/gl/gl_bindings.h"
+ #include "ui/gl/gl_implementation.h"
++#include "base/strings/stringize_macros.h"
+ 
++#define OVERLAY_PATH "OVERLAY_PATH"
+ 
+ namespace content
+ {
+@@ -75,6 +77,8 @@ ImxVpuVideoDecodeAccelerator::ImxVpuVideoDecodeAccelerator(base::WeakPtr < gpu::
+ 	, vpu_decoder_(NULL)
+ 	, initial_info_received_(false)
+ 	, message_loop_(base::MessageLoop::current())
++        , environment_(base::Environment::Create())
++        , overlay_path(false)
+ {
+ 	vpu_bitstream_buffer_block_.virtual_address = NULL;
+ }
+@@ -152,6 +156,17 @@ bool ImxVpuVideoDecodeAccelerator::Initialize(media::VideoCodecProfile profile,
+ 
+ 	VLOG(1) << "Initialization done";
+ 
++/*zhaolin: add to support overlay path*/
++#if 1
++	mfw_v4l_init(&mfw_v4l_info);
++      std::string temp;
++      if(environment_->GetVar(STRINGIZE_NO_EXPANSION(OVERLAY_PATH),&temp)){
++      VLOG(1) << "overlay path value is " << temp << "frome environment variable";
++      if(temp == "1")
++      overlay_path = true;
++      }
++#endif
++	
+ 	return true;
+ }
+ 
+@@ -159,6 +174,7 @@ bool ImxVpuVideoDecodeAccelerator::Initialize(media::VideoCodecProfile profile,
+ void ImxVpuVideoDecodeAccelerator::Decode(media::BitstreamBuffer const &bitstream_buffer)
+ {
+ 	VLOG(3) << "Decoding bitstream buffer";
++	//fprintf(stderr, "Decoding bistream buffer1\n");
+ 
+ 	base::AutoLock auto_lock(lock_);
+ 
+@@ -224,6 +240,15 @@ void ImxVpuVideoDecodeAccelerator::ReusePictureBuffer(int32 picture_buffer_id)
+ 
+ 	VLOG(3) << "Reusing picture buffer with ID " << picture_buffer_id;
+ 
++/*zhaolin: add to support overlay path*/
++#if 1
++	if(overlay_path && mfw_v4l2_try_dq_buffer(&mfw_v4l_info, DEQUEUE_TIMES_IN_SHOW))
++	{
++	    ImxVpuFramebuffer &framebuffer = vpu_framebuffers_[mfw_v4l_info.last_dq_index];
++	    imx_vpu_dec_mark_framebuffer_as_displayed(vpu_decoder_, &framebuffer);
++	}
++#endif
++
+ 	for (size_t i = 0; i < vpu_framebuffers_.size(); ++i)
+ 	{
+ 		ImxVpuFramebuffer &framebuffer = vpu_framebuffers_[i];
+@@ -232,12 +257,22 @@ void ImxVpuVideoDecodeAccelerator::ReusePictureBuffer(int32 picture_buffer_id)
+ 		{
+ 			ImxVpuDecReturnCodes ret;
+ 
+-			if ((ret = imx_vpu_dec_mark_framebuffer_as_displayed(vpu_decoder_, &framebuffer)) != IMX_VPU_DEC_RETURN_CODE_OK)
+-			{
+-				LOG(ERROR) << "Marking framebuffer for picture buffer with ID " << picture_buffer_id << "as displayed failed : " << imx_vpu_dec_error_string(ret);
+-			}
+-			else
+-				ProcessQueuedInput();
++/*zhaolin: add to support overlay path*/
++#if 1
++                 if(overlay_path){
++	                 struct shared_info_ *pos_info = (struct shared_info_ *)mfw_v4l_info.shm;
++	                  mfw_v4l_info.axis_left = pos_info->x;
++	                  mfw_v4l_info.axis_top = pos_info->y;
++			     mfw_v4l2_set_crop(&mfw_v4l_info, pos_info->width, pos_info->height);
++	                  mfw_v4l_show_frame(&mfw_v4l_info, &framebuffer);
++                 }
++		    else{
++				if ((ret = imx_vpu_dec_mark_framebuffer_as_displayed(vpu_decoder_, &framebuffer)) != IMX_VPU_DEC_RETURN_CODE_OK)		
++				   LOG(ERROR) << "Marking framebuffer for picture buffer with ID " << picture_buffer_id << "as displayed failed : " << imx_vpu_dec_error_string(ret);
++		    }
++#endif
++
++			ProcessQueuedInput();
+ 
+ 			return;
+ 		}
+@@ -282,6 +317,17 @@ void ImxVpuVideoDecodeAccelerator::Reset()
+ 	base::AutoLock auto_lock(lock_);
+ 
+ 	VLOG(2) << "Reset: flushing decoder";
++
++#if 1
++      if(overlay_path){
++	      while(mfw_v4l2_dq_buffer(&mfw_v4l_info))
++		{
++		    ImxVpuFramebuffer &framebuffer = vpu_framebuffers_[mfw_v4l_info.last_dq_index];
++		    imx_vpu_dec_mark_framebuffer_as_displayed(vpu_decoder_, &framebuffer);
++		}
++      	}
++#endif
++	
+ 	imx_vpu_dec_flush(vpu_decoder_);
+ 
+ 	VLOG(2) << "Reset: ending all queued bitstream buffers";
+@@ -435,11 +481,32 @@ bool ImxVpuVideoDecodeAccelerator::AllocateAndRegisterVPUFramebuffers()
+ 		&total_size
+ 	);
+ 
+-	vpu_framebuffers_.resize(vpu_dec_initial_info_.min_num_required_framebuffers + media::limits::kMaxVideoFrames);
++ //	vpu_framebuffers_.resize(vpu_dec_initial_info_.min_num_required_framebuffers + media::limits::kMaxVideoFrames);
++        vpu_framebuffers_.resize(vpu_dec_initial_info_.min_num_required_framebuffers + 8);
+ 	vpu_framebuffer_mem_blocks_.resize(vpu_framebuffers_.size());
+ 	memset(&(vpu_framebuffers_[0]), 0, sizeof(ImxVpuFramebuffer) * vpu_framebuffers_.size());
+ 	memset(&(vpu_framebuffer_mem_blocks_[0]), 0, sizeof(ImxVpuMemBlock) * vpu_framebuffers_.size());
+ 
++/*zhaolin: add to support overlay path*/
++#if 1
++      MFWInputFormat input_format;
++	input_format.buffers_required = vpu_framebuffers_.size();
++	input_format.width = vpu_dec_initial_info_.frame_width;
++	input_format.height = vpu_dec_initial_info_.frame_height;
++	input_format.cr_left_bypixel = vpu_dec_initial_info_.crop_left; 
++	input_format.cr_top_bypixel = vpu_dec_initial_info_.crop_top;
++	input_format.cr_right_bypixel = vpu_dec_initial_info_.crop_right;
++	input_format.cr_bottom_bypixel = vpu_dec_initial_info_.crop_bottom;
++   
++	mfw_v4l_set_format(&mfw_v4l_info, &input_format);
++	mfw_v4l2_input_init(&mfw_v4l_info, mfw_v4l_info.outformat);
++	mfw_v4l2_buffer_init(&mfw_v4l_info);
++	mfw_v4l2_display_init(&mfw_v4l_info, mfw_v4l_info.disp_width, mfw_v4l_info.disp_height);
++
++	total_size = mvcol_size + vpu_dec_initial_info_.framebuffer_alignment;
++	
++#endif
++
+ 	for (unsigned int i = 0; i < vpu_framebuffers_.size(); ++i)
+ 	{
+ 		ImxVpuFramebuffer &framebuffer = vpu_framebuffers_[i];
+@@ -456,8 +523,12 @@ bool ImxVpuVideoDecodeAccelerator::AllocateAndRegisterVPUFramebuffers()
+ 
+ 		framebuffer.y_stride = y_stride;
+ 		framebuffer.cbcr_stride = cbcr_stride;
+-		framebuffer.virtual_address = memblock.virtual_address;
+-		framebuffer.physical_address = memblock.physical_address;
++		//framebuffer.virtual_address = memblock.virtual_address;
++		//framebuffer.physical_address = memblock.physical_address;
++		framebuffer.virtual_address = (mfw_v4l_info.all_buffer_pool[i])->virtual_address;
++		framebuffer.physical_address =  (mfw_v4l_info.all_buffer_pool[i])->v4l_buf.m.offset;
++             framebuffer.physical_address_movcol = memblock.physical_address;
++		
+ 		framebuffer.y_offset = 0;
+ 		framebuffer.cb_offset = y_size;
+ 		framebuffer.cr_offset = y_size + cbcr_size;
+@@ -491,6 +562,11 @@ bool ImxVpuVideoDecodeAccelerator::DeallocateVpuFramebuffers()
+ 	}
+ 	vpu_framebuffer_mem_blocks_.clear();
+ 
++/*zhaolin: add to support overlay path*/
++#if 1
++    mfw_v4l_finalize(&mfw_v4l_info);
++#endif
++
+ 	return true;
+ }
+ 
+@@ -570,6 +646,15 @@ ImxVpuVideoDecodeAccelerator::ProcessRetval ImxVpuVideoDecodeAccelerator::Proces
+ 	encoded_frame.codec_data = NULL;
+ 	encoded_frame.codec_data_size = 0;
+ 
++/*zhaolin: add to support overlay path*/
++#if 1
++	if(overlay_path && mfw_v4l2_try_dq_buffer(&mfw_v4l_info, DEQUEUE_TIMES_IN_SHOW))
++	{
++	    ImxVpuFramebuffer &framebuffer = vpu_framebuffers_[mfw_v4l_info.last_dq_index];
++	    imx_vpu_dec_mark_framebuffer_as_displayed(vpu_decoder_, &framebuffer);
++	}
++#endif
++
+ 
+ 	unsigned int output_code;
+ 	if ((ret = imx_vpu_dec_decode_frame(vpu_decoder_, &encoded_frame, &output_code)) != IMX_VPU_DEC_RETURN_CODE_OK)
+diff --git a/content/common/gpu/media/imxvpu_video_decode_accelerator.h b/content/common/gpu/media/imxvpu_video_decode_accelerator.h
+index 9f67edb..c924698 100644
+--- a/content/common/gpu/media/imxvpu_video_decode_accelerator.h
++++ b/content/common/gpu/media/imxvpu_video_decode_accelerator.h
+@@ -20,6 +20,7 @@
+ #include "imxvpucodec.h"
+ #include "imx_gl_viv_direct_texture.h"
+ 
++#include "base/environment.h"
+ 
+ namespace content
+ {
+@@ -67,6 +68,9 @@ private:
+ 
+ 
+ 	scoped_ptr < base::WeakPtrFactory < Client > > client_ptr_factory_;
++
++        /*Adam Zhu: get an environment to control overlay path*/        
++        scoped_ptr < base::Environment> environment_;
+ 	base::WeakPtr < Client > client_;
+ 
+ 	base::WeakPtr < gpu::gles2::GLES2Decoder > const gles2_decoder_;
+@@ -96,6 +100,9 @@ private:
+ 	// ChildThread's message loop
+ 	base::MessageLoop* message_loop_;
+ 
++	MFW_V4L_INFO_T mfw_v4l_info;
++	bool overlay_path;
++
+ 	DISALLOW_COPY_AND_ASSIGN(ImxVpuVideoDecodeAccelerator);
+ };
+ 
+diff --git a/content/common/gpu/media/imxvpucodec.h b/content/common/gpu/media/imxvpucodec.h
+index 4fb63b3..780c735 100644
+--- a/content/common/gpu/media/imxvpucodec.h
++++ b/content/common/gpu/media/imxvpucodec.h
+@@ -188,6 +188,7 @@ typedef struct
+ 	void *virtual_address;
+ 	/* The physical address must always be valid. */
+ 	imx_vpu_phys_addr_t physical_address;
++	imx_vpu_phys_addr_t physical_address_movcol;
+ 
+ 	/* These define the starting offsets of each component
+ 	 * relative to the start of the buffer. Specified in bytes.
+@@ -360,6 +361,12 @@ typedef struct
+ 
+ 	/* Physical framebuffer addresses must be aligned to this value. */
+ 	unsigned int framebuffer_alignment;
++
++      /*crop info for input bitstream*/
++      unsigned int crop_left;
++      unsigned int crop_right;
++      unsigned int crop_top;
++      unsigned int crop_bottom;
+ }
+ ImxVpuDecInitialInfo;
+ 
+@@ -406,8 +413,117 @@ int imx_vpu_dec_get_num_free_framebuffers(ImxVpuDecoder *decoder);
+ int imx_vpu_dec_get_min_num_free_required(ImxVpuDecoder *decoder);
+ ImxVpuDecReturnCodes imx_vpu_dec_mark_framebuffer_as_displayed(ImxVpuDecoder *decoder, ImxVpuFramebuffer const *framebuffer);
+ 
++/*zhaolin: add video overlay path in chromium*/
++#if 1
++#include <linux/videodev2.h>
++
++#ifndef TRUE
++#define TRUE (1)
++#endif
++
++
++#ifndef FALSE
++#define FALSE (0)
++#endif
++
+ 
++#ifndef BOOL
++#define BOOL int
++#endif
+ 
++#define DEFAULT_FRAME_BUFFER_ALIGNMENT_H 16
++#define DEFAULT_FRAME_BUFFER_ALIGNMENT_V 16
++#define DEQUEUE_TIMES_IN_SHOW 10000
++
++typedef struct _MFWV4LBuffer {
++    struct v4l2_buffer v4l_buf;
++    void *virtual_address;
++}MFWV4LBuffer;
++
++typedef struct _MFWInputFormat {
++    int width;
++    int height;
++    int cr_left_bypixel;         
++    int cr_right_bypixel;       
++    int cr_top_bypixel;          
++    int cr_bottom_bypixel;       
++    unsigned int buffers_required;
++}MFWInputFormat;
++
++typedef struct shared_info_{
++    int x;
++    int y;
++    int width;
++    int height;
++}shared_info;
++
++typedef struct MFW_V4L_INFO_S{
++
++  int width;
++  int height;                  /* the size of the incoming YUV stream */
++  int in_width;
++  int in_height;
++  int disp_height;             /* resize display height */
++  int disp_width;              /* resize display width */
++  int axis_top;                /* diplay top co-ordinate */
++  int axis_left;               /* diplay left co-ordinate */
++  char v4l_dev_name[64];       /*  strings of device name */
++  int v4l_id;                  /* device ID */
++  int cr_left_bypixel;         /* crop left offset set by decoder in caps */
++  int cr_right_bypixel;        /* crop right offset set by decoder in caps */
++  int cr_top_bypixel;          /* crop top offset set by decoder in caps */
++  int cr_bottom_bypixel;       /* crop bottom offset set by decoder in caps */
++  int crop_left;               /* crop left offset set through propery */
++  int crop_right;              /* crop right offset set through propery */
++  int crop_top;                /* crop top offset set through propery */
++  int crop_bottom;             /* crop bottom offset set through propery */
++  int fullscreen_width;
++  int fullscreen_height;
++
++  int fd_fb;
++  int qbuff_count;             /* buffer counter, increase when frame queued to v4l device */
++
++  unsigned int buffers_required;       /* hwbuffer limitation */
++  
++  int querybuf_index;          /* pre-allocated hw/sw buffer counter */
++
++  int v4lqueued;               /* counter for queued v4l buffer in device queue */
++  MFWV4LBuffer **all_buffer_pool;       /* malloced array to store all hw/sw buffers */
++  int additional_buffer_depth;
++  int frame_dropped;
++  unsigned int outformat;
++  unsigned int outformat_flags;
++  int rotate;                  /* display rotate angle */
++  int prevRotate;              /* Previous display rotate angle */
++
++  BOOL stream_on;
++  struct v4l2_crop crop;
++  struct v4l2_crop prevCrop;    /* The previous crop information */
++  struct v4l2_rect previCrop;   /* The previous video input crop information */
++  int last_dq_index; 
++  BOOL keep_aspect_ratio;
++  
++  /*get info for video position in viewport*/
++  int shmid;
++  void *shm;
++
++  BOOL field;
++}MFW_V4L_INFO_T;
++
++void mfw_v4l_init(MFW_V4L_INFO_T * v4l_info);
++BOOL mfw_v4l_set_format(MFW_V4L_INFO_T * v4l_info, MFWInputFormat * input_format);
++BOOL mfw_v4l2_input_init(MFW_V4L_INFO_T * v4l_info, unsigned long inp_format);
++BOOL mfw_v4l2_buffer_init(MFW_V4L_INFO_T * v4l_info);
++BOOL mfw_v4l2_streamoff(MFW_V4L_INFO_T * v4l_info);
++void mfw_v4l_close (MFW_V4L_INFO_T * v4l_info);
++void mfw_v4l_finalize(MFW_V4L_INFO_T * v4l_info);
++BOOL mfw_v4l2_display_init(MFW_V4L_INFO_T * v4l_info, unsigned int disp_width, unsigned int disp_height);
++BOOL mfw_v4l2_try_dq_buffer(MFW_V4L_INFO_T *v4l_info, int cntout);
++BOOL mfw_v4l_show_frame(MFW_V4L_INFO_T * v4l_info, ImxVpuFramebuffer * buf);
++BOOL mfw_v4l2_dq_buffer(MFW_V4L_INFO_T * v4l_info);
++BOOL mfw_v4l2_set_crop(MFW_V4L_INFO_T * v4l_info,unsigned long display_width,  unsigned long display_height);
++
++#endif
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/content/common/gpu/media/imxvpucodec_fslwrapper.c b/content/common/gpu/media/imxvpucodec_fslwrapper.c
+index ef4a748..09f1d5d 100644
+--- a/content/common/gpu/media/imxvpucodec_fslwrapper.c
++++ b/content/common/gpu/media/imxvpucodec_fslwrapper.c
+@@ -28,8 +28,7 @@
+ #include <vpu_wrapper.h>
+ #include "imxvpucodec.h"
+ #include "imxvpucodec_platform.h"
+-
+-
++#include <stdio.h>
+ 
+ 
+ /***********************************************/
+@@ -126,7 +125,8 @@ static void convert_to_wrapper_framebuffer(ImxVpuFramebuffer *fb, VpuFrameBuffer
+ 	wrapper_fb->pbufY = (unsigned char*)(fb->physical_address + fb->y_offset);
+ 	wrapper_fb->pbufCb = (unsigned char*)(fb->physical_address + fb->cb_offset);
+ 	wrapper_fb->pbufCr = (unsigned char*)(fb->physical_address + fb->cr_offset);
+-	wrapper_fb->pbufMvCol = (unsigned char*)(fb->physical_address + fb->mvcol_offset);
++	wrapper_fb->pbufMvCol = (unsigned char*)(fb->physical_address_movcol)/*(fb->physical_address + fb->mvcol_offset)*/;
++      //	fprintf(stderr, "physical addr:%lx, movcol:%lx \n", wrapper_fb->pbufY, wrapper_fb->pbufMvCol);
+ }
+ 
+ 
+@@ -233,6 +233,11 @@ static void dec_convert_from_wrapper_initial_info(VpuDecInitInfo *wrapper_info,
+ 	info->width_height_ratio = wrapper_info->nQ16ShiftWidthDivHeightRatio;
+ 
+ 	info->framebuffer_alignment = wrapper_info->nAddressAlignment;
++
++	info->crop_left = wrapper_info->PicCropRect.nLeft;;
++	info->crop_top = wrapper_info->PicCropRect.nTop;
++	info->crop_right = wrapper_info->PicCropRect.nRight;
++	info->crop_bottom = wrapper_info->PicCropRect.nBottom;
+ }
+ 
+ 
+@@ -1048,3 +1053,763 @@ ImxVpuDecReturnCodes imx_vpu_dec_mark_framebuffer_as_displayed(ImxVpuDecoder *de
+ 	return IMX_VPU_DEC_RETURN_CODE_OK;
+ }
+ 
++/*zhaolin: add video overlay path in chromium*/
++#if 1
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <string.h>
++#include <errno.h>
++#include <linux/fb.h>
++#include <sys/shm.h>
++//#include </linux/mxcfb.h>
++
++#define FB_DEIVCE "/dev/fb0"
++#define MIN_QUEUE_NUM             2 
++#define QUEUE_SIZE_HIGH 5
++
++BOOL mfw_fb0_open(int *fb)
++{
++    BOOL retval = TRUE;
++    char fb_device[100] = FB_DEIVCE;
++
++	if ((*fb =
++	     open(fb_device, O_RDWR, 0)) < 0) {
++	    fprintf(stderr, "Unable to open %s %d\n", fb_device, *fb);
++          *fb = 0;
++	    retval = FALSE;
++    }
++    return retval;
++}
++
++BOOL mfw_fb0_close(int *fb)
++{
++    BOOL retval = TRUE;
++    if (*fb) {
++        close(*fb);
++        *fb = 0;
++    }
++    return retval;
++}
++
++struct mxcfb_gbl_alpha {
++        int enable;
++        int alpha;
++};
++
++#define MXCFB_SET_GBL_ALPHA     _IOW('F', 0x21, struct mxcfb_gbl_alpha)
++
++BOOL mfw_set_gbl_alpha(int fb, int alphaVal)
++{
++    BOOL ret = TRUE;
++
++    struct mxcfb_gbl_alpha alpha;
++
++    alpha.alpha = alphaVal;
++    alpha.enable = 1;
++    if (fb == 0)
++        fprintf(stderr, "no fb0 device\n");
++    if (ioctl(fb, MXCFB_SET_GBL_ALPHA, &alpha) < 0) {
++        fprintf(stderr, "set global alpha failed.\n");
++        ret = FALSE;
++    }
++
++    return ret;
++}
++
++void mfw_v4l_init(MFW_V4L_INFO_T * v4l_info)
++{
++  v4l_info->all_buffer_pool = NULL;
++  v4l_info->disp_height = 0;
++  v4l_info->disp_width = 0;
++  v4l_info->axis_top = 0;
++  v4l_info->axis_left = 0;
++  v4l_info->crop_left = 0;
++  v4l_info->crop_right = 0;
++  v4l_info->crop_top = 0;
++  v4l_info->crop_bottom = 0;
++  
++  v4l_info->cr_left_bypixel = 0;
++  v4l_info->cr_right_bypixel = 0;
++  v4l_info->cr_top_bypixel = 0;
++  v4l_info->cr_bottom_bypixel = 0;
++
++  v4l_info->querybuf_index = 0;
++
++  v4l_info->outformat = V4L2_PIX_FMT_YUV420;//V4L2_PIX_FMT_NV12;
++
++  v4l_info->field = V4L2_FIELD_ANY;
++
++  v4l_info->rotate = 0;
++  v4l_info->prevRotate = 0;
++
++  memset (&v4l_info->crop, 0, sizeof (struct v4l2_crop));
++  memset (&v4l_info->prevCrop, 0, sizeof (struct v4l2_crop));
++  memset (&v4l_info->previCrop, 0, sizeof (struct v4l2_rect));
++
++  v4l_info->stream_on = FALSE;
++  v4l_info->v4lqueued = 0;
++  v4l_info->qbuff_count = 0;
++
++  v4l_info->v4l_id = -1;
++  mfw_fb0_open (&v4l_info->fd_fb);
++  mfw_fb0_get_resolution (v4l_info);
++  v4l_info->disp_height = v4l_info->fullscreen_height;
++  v4l_info->disp_width = v4l_info->fullscreen_width;
++  
++  v4l_info->keep_aspect_ratio = FALSE;
++
++  mfw_set_gbl_alpha (v4l_info->fd_fb, 0);
++
++  strcpy (v4l_info->v4l_dev_name, "/dev/video17");
++
++  v4l_info->shmid = -1;
++  v4l_info->shm = NULL;
++
++}
++
++BOOL
++mfw_v4l2_streamon(MFW_V4L_INFO_T * v4l_info)
++{
++  int type;
++
++  type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++  if (ioctl (v4l_info->v4l_id, VIDIOC_STREAMON, &type) < 0) {
++    fprintf(stderr, "Could not stream on\n");
++    return FALSE;
++  } else {
++    fprintf(stderr, "Set to Stream ON successfully\n");
++  }
++
++  v4l_info->stream_on = TRUE;
++  return TRUE;
++}
++
++BOOL
++mfw_v4l2_streamoff(MFW_V4L_INFO_T * v4l_info)
++{
++  int type;
++  int err;
++  if (v4l_info->stream_on) {
++    type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++
++    err = ioctl (v4l_info->v4l_id, VIDIOC_STREAMOFF, &type);
++    if (err < 0) {
++      fprintf(stderr,"Set VIDIOC_STREAMOFF failed: %d.\n", err);
++      return FALSE;
++    } else {
++      fprintf(stderr, "Set to Stream off successfully\n");
++    }
++
++    v4l_info->qbuff_count = 0;
++    v4l_info->stream_on = FALSE;
++  }
++  return TRUE;
++}
++
++BOOL mfw_v4l_set_format(MFW_V4L_INFO_T * v4l_info, MFWInputFormat * input_format)
++{
++  unsigned int pad_width, pad_height;
++  unsigned int width, height;
++
++  v4l_info->buffers_required = input_format->buffers_required;
++  v4l_info->width = input_format->width;
++  v4l_info->height = input_format->height;
++  
++  pad_width = IMX_VPU_ALIGN_VAL_TO (input_format->width, FRAME_ALIGN);
++  pad_height = IMX_VPU_ALIGN_VAL_TO (input_format->height, FRAME_ALIGN);
++
++  fprintf(stderr,"pad width:%d, %d\n", pad_width, pad_height);
++  width = input_format->cr_right_bypixel - input_format->cr_left_bypixel;
++  height = input_format->cr_bottom_bypixel - input_format->cr_top_bypixel;
++  fprintf(stderr,"input format:%d,%d,%d,%d,%d,%d\n",input_format->width, input_format->height,
++   	              input_format->cr_left_bypixel, input_format->cr_right_bypixel, input_format->cr_top_bypixel,input_format->cr_bottom_bypixel );
++
++  v4l_info->crop_left = input_format->cr_left_bypixel;
++  v4l_info->crop_top =  input_format->cr_top_bypixel;
++  v4l_info->crop_right = pad_width - width - v4l_info->crop_left;
++  v4l_info->crop_bottom = pad_height - height - v4l_info->crop_top;
++
++  return TRUE;
++}
++
++void mfw_v4l_close(MFW_V4L_INFO_T * v4l_info)
++{
++    if (v4l_info->v4l_id != -1) {
++      fprintf(stderr, "--> Close v4l2 device\n");
++      close (v4l_info->v4l_id);
++      v4l_info->v4l_id = -1;
++    }
++	
++    return;
++}
++
++BOOL mfw_v4l2_open(MFW_V4L_INFO_T * v4l_info)
++{
++    BOOL retval = TRUE;
++
++  /*No need to open v4l device when it has opened--change para on-the-fly */
++    if (v4l_info->v4l_id<0){
++
++      if (v4l_info->v4l_dev_name[0]!='\0'){
++        v4l_info->v4l_id =
++                  open (v4l_info->v4l_dev_name, O_RDWR | O_NONBLOCK, 0);
++      }else{
++        fprintf(stderr, "cannot get v4l device name\n");
++	  retval = FALSE;
++      }
++    }
++    /* open the V4l device */
++    if ((v4l_info->v4l_id) < 0) {
++      fprintf(stderr, "Unable to open %s", v4l_info->v4l_dev_name);
++      retval = FALSE;
++    }
++
++  return retval;
++
++}
++
++BOOL
++mfw_v4l2_output_setup(struct v4l2_format *fmt,
++    MFW_V4L_INFO_T * v4l_info)
++{
++  struct v4l2_requestbuffers buf_req;
++
++  int ret;
++
++  if (ret = ioctl (v4l_info->v4l_id, VIDIOC_S_FMT, fmt) < 0) {
++    fprintf(stderr, "set format failed %d\n", ret);
++    return FALSE;
++  }
++
++  if (ioctl (v4l_info->v4l_id, VIDIOC_G_FMT, fmt) < 0) {
++    fprintf(stderr, "get format failed\n");
++    return FALSE;
++  }
++
++#define MIN_BUFFER_NUM              5
++  while (v4l_info->buffers_required >= MIN_BUFFER_NUM) {
++
++    memset (&buf_req, 0, sizeof (buf_req));
++    buf_req.count = v4l_info->buffers_required;
++    buf_req.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++    buf_req.memory = V4L2_MEMORY_MMAP;
++
++    if (ioctl (v4l_info->v4l_id, VIDIOC_REQBUFS, &buf_req) >= 0) {
++      fprintf (stderr, "%d hwbuffers sucessfully allocated.",
++          v4l_info->buffers_required);
++      return TRUE;
++    }else{
++      fprintf(stderr, "Try to allocate %d hw buffer failed!!", v4l_info->buffers_required);
++    }
++
++    v4l_info->buffers_required--;
++  }
++
++  return TRUE;
++}
++
++/*set input fmt, it is useful to require surface*/
++BOOL mfw_v4l2_mx6q_set_fmt(MFW_V4L_INFO_T * v4l_info,
++    unsigned long in_fmt, unsigned long width, unsigned long height)
++{
++  struct v4l2_format fmt;
++  BOOL retval = TRUE;
++
++  unsigned int in_width = 0;
++  unsigned int in_height = 0;
++  int cr_left = 0;
++  int cr_top = 0;
++  int cr_right = 0;
++  int cr_bottom = 0;
++ 
++  struct v4l2_rect icrop;
++
++  /* set the input cropping parameters */
++  in_width = width;
++  in_height = height;
++  memset (&fmt, 0, sizeof (fmt));
++  fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++
++  if (v4l_info->crop_left + v4l_info->crop_right > in_width \
++          || v4l_info->crop_top + v4l_info->crop_bottom > in_height) {
++      fprintf(stderr, "video crop parameters error.\n");
++      return retval;
++  }
++
++  cr_left = v4l_info->cr_left_bypixel + v4l_info->crop_left;
++  cr_top = v4l_info->cr_top_bypixel + v4l_info->crop_top;
++  cr_right = v4l_info->cr_right_bypixel + v4l_info->crop_right;
++  cr_bottom = v4l_info->cr_bottom_bypixel + v4l_info->crop_bottom;
++  in_width -= v4l_info->crop_left + v4l_info->crop_right;
++  in_height -= v4l_info->crop_top + v4l_info->crop_bottom;
++
++  fmt.fmt.pix.width = in_width + cr_left + cr_right;
++  fmt.fmt.pix.height = in_height + cr_top + cr_bottom;
++  fmt.fmt.pix.pixelformat = in_fmt;
++
++  fprintf(stderr,"set format: %d,%d, %d, %d,%d, %d \n", in_width, in_height, cr_left, cr_right, cr_top, cr_bottom);
++
++  /*zhaolin: need height-1, otherwise it would cause black screen for 3~4 seconds.*/
++  icrop.left = cr_left;
++  icrop.top = cr_top;
++  icrop.width = in_width;
++  icrop.height = in_height-1;
++  fmt.fmt.pix.priv = (unsigned int) &icrop;
++
++  memcpy (&v4l_info->previCrop, &icrop, sizeof (struct v4l2_rect));
++  retval = mfw_v4l2_output_setup(&fmt, v4l_info);
++  if (retval == FALSE) {
++          fprintf(stderr, "Error in mfw_v4l_output_setup\n");
++   }
++
++  return retval;
++}
++
++BOOL
++mfw_v4l2_set_rotation(MFW_V4L_INFO_T * v4l_info)
++{
++  struct v4l2_control ctrl;
++  BOOL retval = TRUE;
++
++  /* Set the rotation */
++  ctrl.id = V4L2_CID_ROTATE;
++
++  ctrl.value = 0;//v4l_info->rotate;
++  if (ioctl (v4l_info->v4l_id, VIDIOC_S_CTRL, &ctrl) < 0) {
++    fprintf(stderr, "set ctrl failed\ns");
++    ioctl (v4l_info->v4l_id, VIDIOC_G_CTRL, &ctrl);
++    v4l_info->rotate = ctrl.value;
++    retval = FALSE;
++  } else {
++      fprintf(stderr, "set v4l rotate sucessfully\n");
++  }
++  v4l_info->prevRotate = v4l_info->rotate;
++
++  return retval;
++}
++
++BOOL mfw_v4l2_input_init(MFW_V4L_INFO_T * v4l_info, unsigned long inp_format)
++{
++	mfw_v4l2_open(v4l_info);
++
++      mfw_v4l2_set_rotation(v4l_info);
++
++	mfw_v4l2_mx6q_set_fmt(v4l_info, inp_format,
++        v4l_info->width, v4l_info->height);
++
++	v4l_info->shmid = shmget((key_t)1234, sizeof(struct shared_info_), 0666|IPC_CREAT);  
++	if(v4l_info->shmid == -1)  
++	    fprintf(stderr, "shmget failed\n");  
++	v4l_info->shm = shmat(v4l_info->shmid, 0, 0);  
++	if(v4l_info->shm == (void*)-1)  
++	   fprintf(stderr, "shmat failed\n");  
++	fprintf(stderr, "shm: %lx in vl4_init \n",v4l_info->shm);
++	
++	return TRUE;
++}
++
++MFWV4LBuffer *
++mfw_v4l2_new_hwbuffer(MFW_V4L_INFO_T * v4l_info)
++{
++	unsigned int image_width = 0;
++	int cr_left = 0, cr_right = 0, cr_top = 0;
++	MFWV4LBuffer *v4lsink_buffer = NULL;
++	struct v4l2_buffer *v4lbuf;
++
++	v4lsink_buffer = malloc(sizeof(MFWV4LBuffer));
++	memset (&v4lsink_buffer->v4l_buf, 0, sizeof (struct v4l2_buffer));
++
++	v4lbuf = &v4lsink_buffer->v4l_buf;
++	v4lbuf->index = v4l_info->querybuf_index;
++	v4lbuf->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++	v4lbuf->memory = V4L2_MEMORY_MMAP;
++
++	if (ioctl (v4l_info->v4l_id, VIDIOC_QUERYBUF, v4lbuf) < 0) {
++	  fprintf(stderr,"VIDIOC_QUERYBUF failed %d, device id:%d,  err:%s",
++	     v4l_info->querybuf_index, v4l_info->v4l_id, strerror (errno));
++	  free (v4lsink_buffer);
++	  v4lsink_buffer = NULL;
++	  goto queryret;
++	}
++
++	v4lsink_buffer->virtual_address=
++	mmap (NULL, v4lbuf->length,
++	  PROT_READ | PROT_WRITE, MAP_SHARED, v4l_info->v4l_id, v4lbuf->m.offset);
++
++	if (v4lsink_buffer->virtual_address == MAP_FAILED) {
++	    fprintf(stderr, "mmap v4l2 buffer failed.\n");
++	    return NULL;
++	}
++
++	/* Walkaround for V4L, it need QUERYBUF twice to get the hardware address */
++	if (ioctl (v4l_info->v4l_id, VIDIOC_QUERYBUF, v4lbuf) < 0) {
++	    fprintf(stderr,"VIDIOC_QUERYBUF failed %d, device id:%d,  err:%s",
++	        v4l_info->querybuf_index, v4l_info->v4l_id, strerror (errno));
++	    free (v4lsink_buffer);
++	    v4lsink_buffer = NULL;
++	    goto queryret;
++	}
++
++     // fprintf(stderr, "phy addr:%lx, virtu addr:%lx, length:%lx .\n", v4lbuf->m.offset,v4lsink_buffer->virtual_address, v4lbuf->length);
++
++      if (v4lsink_buffer->virtual_address== NULL) {
++         fprintf(stderr, "v4l2_out test: mmap failed");
++          free (v4lsink_buffer);
++         v4lsink_buffer = NULL;
++         goto queryret;
++      }
++
++	cr_left = v4l_info->cr_left_bypixel;
++	cr_right = v4l_info->cr_right_bypixel;
++	cr_top = v4l_info->cr_top_bypixel;
++
++	/* The input cropping is set here */
++	if ((cr_left != 0) || (cr_right != 0) || (cr_top != 0)) {
++	    image_width = v4l_info->width;
++	    v4lbuf->m.offset = v4lbuf->m.offset
++	      + (cr_top * (image_width + cr_left + cr_right)) + cr_left;
++	}
++
++	v4l_info->all_buffer_pool[v4l_info->querybuf_index++] = v4lsink_buffer;
++
++queryret:
++     return v4lsink_buffer;
++	
++}
++
++BOOL mfw_v4l2_buffer_init(MFW_V4L_INFO_T * v4l_info)
++{
++  if (v4l_info->all_buffer_pool) {
++    free (v4l_info->all_buffer_pool);
++    v4l_info->all_buffer_pool = NULL;
++  }
++
++  v4l_info->all_buffer_pool = malloc (sizeof (void *) *
++      (v4l_info->buffers_required));
++
++  if (v4l_info->all_buffer_pool == NULL) {
++    fprintf(stderr, "Failed to allocate buffer pool container\n");
++    return FALSE;
++  }
++
++  memset (v4l_info->all_buffer_pool, 0, (sizeof (void *) *
++          (v4l_info->buffers_required)));
++
++  MFWV4LBuffer *tmpbuffer;
++
++  while (v4l_info->querybuf_index < v4l_info->buffers_required) {
++  	 tmpbuffer = mfw_v4l2_new_hwbuffer(v4l_info);
++	  if (!tmpbuffer) {
++          fprintf(stderr, "mfw_gst_v4l2_new_hwbuffer failed.\n");
++          return FALSE;
++        }
++   }
++
++  return TRUE;
++}
++
++BOOL
++mfw_v4l2_dq_buffer(MFW_V4L_INFO_T * v4l_info)
++{
++  struct v4l2_buffer v4l2buf;
++  BOOL ret = FALSE;
++  memset (&v4l2buf, 0, sizeof (struct v4l2_buffer));
++  v4l2buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++  v4l2buf.memory = V4L2_MEMORY_MMAP;
++  
++  if (!((ioctl (v4l_info->v4l_id, VIDIOC_DQBUF, &v4l2buf)) < 0)){ 
++        v4l_info->v4lqueued--;
++	  ret = TRUE;
++	  v4l_info->last_dq_index = v4l2buf.index; 
++  }
++  
++  return ret;
++}
++
++BOOL
++mfw_v4l2_try_dq_buffer(MFW_V4L_INFO_T *v4l_info, int cntout)
++{
++  int cnt;
++  for (cnt = 0; cnt < cntout; cnt++) {
++    if (v4l_info->v4lqueued <= MIN_QUEUE_NUM) {
++      return FALSE;
++    }
++    if (mfw_v4l2_dq_buffer (v4l_info)){
++      return TRUE;
++    }
++    usleep (300);
++  }
++  fprintf(stderr, "Dqueue failed, %d buffers in v4l2 queue", v4l_info->v4lqueued);
++  return FALSE;
++}
++
++BOOL
++mfw_v4l_show_frame(MFW_V4L_INFO_T * v4l_info, ImxVpuFramebuffer * buf)
++{
++    int i = 0;
++    MFWV4LBuffer *v4lsink_buffer = NULL;
++    struct v4l2_buffer *v4l_buf = NULL;
++	
++    for(; i<v4l_info->buffers_required; i++){
++	v4lsink_buffer = v4l_info->all_buffer_pool[i];
++	if(v4lsink_buffer->v4l_buf.m.offset == buf->physical_address)	
++		break;
++    }
++
++    if(i==v4l_info->buffers_required){
++        fprintf(stderr,"cannot find v4lbuf in mfw_v4l_show_frame.\n");
++	  return FALSE;
++    }
++
++    v4l_buf = &v4lsink_buffer->v4l_buf;
++    /*display immediately */
++    struct timeval queuetime;
++    gettimeofday (&queuetime, NULL);
++
++    v4l_buf->timestamp = queuetime;
++
++    int err_num = ioctl(v4l_info->v4l_id, VIDIOC_QBUF, v4l_buf);
++   
++    if (err_num < 0) {
++        fprintf(stderr, "VIDIOC_QBUF:%d failed, error:%d, queued:%d\n", v4l_buf->index,
++            err_num, v4l_info->v4lqueued);
++       
++        return FALSE;
++    }
++
++    v4l_info->v4lqueued++;
++
++    if(v4l_info->qbuff_count == 1) {
++      mfw_v4l2_streamon(v4l_info);
++    }
++
++    v4l_info->qbuff_count++;
++
++    return TRUE;
++}
++
++void
++mfw_v4l2_free_buffers(MFW_V4L_INFO_T * v4l_info)
++{
++  int totalbuffernum = (v4l_info->buffers_required);
++  int i;
++  MFWV4LBuffer *v4lsink_buffer = NULL;
++
++  if (v4l_info->all_buffer_pool) {
++    /* try to unref all buffer in pool */
++      for (i = 0; i < totalbuffernum; i++) {
++        v4lsink_buffer = (MFWV4LBuffer *) (v4l_info->all_buffer_pool[i]);
++
++        if (v4lsink_buffer) 
++	  	free(v4lsink_buffer);
++	  v4l_info->all_buffer_pool[i] = NULL;
++     }
++
++     free(v4l_info->all_buffer_pool);
++     v4l_info->all_buffer_pool = NULL;
++  }
++
++  return;
++}
++
++BOOL mfw_fb0_get_resolution(MFW_V4L_INFO_T *v4l)
++{
++    int ret;
++    struct fb_var_screeninfo fb_var;
++
++    ret = ioctl(v4l->fd_fb, FBIOGET_VSCREENINFO, &fb_var);
++    if (ret < 0) {
++        fprintf(stderr, "Unable to get resolution value\n");
++        v4l->fullscreen_width = 1024;
++        v4l->fullscreen_height = 768;
++        return FALSE;
++    }
++    v4l->fullscreen_width = fb_var.xres;
++    v4l->fullscreen_height = fb_var.yres;
++    fprintf(stderr, "full screen size:%dx%d\n",v4l->fullscreen_width, v4l->fullscreen_height);
++
++    return TRUE;
++
++}
++
++BOOL
++mfw_gst_v4l2_get_crop_cap(MFW_V4L_INFO_T * v4l_info)
++{
++  struct v4l2_cropcap cropcap;
++  BOOL retval = TRUE;
++  
++  memset (&cropcap, 0, sizeof (cropcap));
++  cropcap.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++
++  if (ioctl (v4l_info->v4l_id, VIDIOC_CROPCAP, &cropcap) < 0) {
++      fprintf(stderr, "get crop capability failed");
++      retval = FALSE;
++  }
++
++  return retval;
++}
++
++BOOL
++mfw_v4l2_set_crop(MFW_V4L_INFO_T * v4l_info,
++     unsigned long display_width,  unsigned long display_height)
++{
++  struct v4l2_crop *crop, *prevCrop;
++  struct v4l2_crop newcrop;
++  BOOL retval = TRUE;
++
++  unsigned long video_width = 0, video_height = 0;
++
++  crop = &v4l_info->crop;
++  prevCrop = &v4l_info->prevCrop;
++
++  mfw_gst_v4l2_get_crop_cap(v4l_info);
++
++  crop->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++
++  crop->c.width = display_width;
++  crop->c.height = display_height;
++  crop->c.top = v4l_info->axis_top;
++  crop->c.left = v4l_info->axis_left;
++
++  if (v4l_info->axis_left < 0) {
++      crop->c.left = 0;
++      crop->c.width -= -v4l_info->axis_left;
++      if (crop->c.width < 0) {
++          crop->c.width = 0;
++          return retval;
++      }
++  }
++  if (v4l_info->axis_left >= v4l_info->fullscreen_width \
++      || v4l_info->axis_top >= v4l_info->fullscreen_height) {
++    fprintf(stderr, "set v4l display crop sucessfully\n");
++    return retval;
++  }
++
++    video_width = v4l_info->width;
++    video_height = v4l_info->height;
++
++  if(v4l_info->keep_aspect_ratio){
++	  /*zhaolin:set crop should according to display width, not code width*/
++	  unsigned int in_width = 0;
++	  unsigned int in_height = 0;
++	  int cr_left = 0;
++	  int cr_top = 0;
++	  int cr_right = 0;
++	  int cr_bottom = 0;
++	  in_width = v4l_info->width;
++	  in_height = v4l_info->height;
++	  cr_left = v4l_info->cr_left_bypixel + v4l_info->crop_left;
++	  cr_top = v4l_info->cr_top_bypixel + v4l_info->crop_top;
++	  cr_right = v4l_info->cr_right_bypixel + v4l_info->crop_right;
++	  cr_bottom = v4l_info->cr_bottom_bypixel + v4l_info->crop_bottom;
++	  in_width -= v4l_info->crop_left + v4l_info->crop_right;
++	  in_height -= v4l_info->crop_top + v4l_info->crop_bottom;
++	  video_width = in_width;
++	  video_height = in_height;
++		
++	    if (crop->c.width * video_height > crop->c.height * video_width) {
++	      int width = video_width * crop->c.height / video_height;
++	      width = (width >> 3) << 3;
++	      crop->c.left = crop->c.left + (crop->c.width - width) / 2;
++	      crop->c.width = width;
++	    } else if (crop->c.width * video_height < crop->c.height * video_width) {
++	      int height = video_height * crop->c.width / video_width;
++	      height = (height >> 3) << 3;
++	      crop->c.top = crop->c.top + (crop->c.height - height) / 2;
++	      crop->c.height = height;
++	    } else {
++	      /* do nothing */
++	    }
++  }
++
++  if ((!memcmp (crop, prevCrop, sizeof (struct v4l2_crop)))) {
++    return TRUE;
++  }
++
++   /* Same with the previous settings, do nothing */
++  fprintf(stderr,"[V4L Current Display]: left=%d, top=%d, width=%d, height=%d",
++      crop->c.left, crop->c.top, crop->c.width, crop->c.height);
++
++  if (ioctl (v4l_info->v4l_id, VIDIOC_S_CROP, crop) < 0) {
++    fprintf(stderr,"set crop failed");
++    if (ioctl (v4l_info->v4l_id, VIDIOC_G_CROP, crop) < 0)
++      fprintf(stderr,"get crop failed");
++    v4l_info->disp_width = crop->c.width;
++    v4l_info->disp_height = crop->c.height;
++    v4l_info->axis_left = crop->c.left;
++    v4l_info->axis_top = crop->c.top;
++    memcpy (prevCrop, crop, sizeof (struct v4l2_crop));
++    fprintf(stderr,"Actual crop settings: %d, %d, %d, %d", crop->c.left, crop->c.top,
++        crop->c.width, crop->c.height);
++    return retval;
++  }
++  else {
++    memcpy (prevCrop, crop, sizeof (struct v4l2_crop));
++    fprintf(stderr,
++        "[V4L Update Display]: left=%d, top=%d, width=%d, height=%d\n",
++         crop->c.left, crop->c.top, crop->c.width, crop->c.height);
++
++    fprintf(stderr,
++        "set v4l display crop sucessfully\n");
++  }
++
++  newcrop.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++
++  if (ioctl( v4l_info->v4l_id, VIDIOC_G_CROP, &newcrop) < 0) {
++      fprintf(stderr,"Get crop failed");
++      goto err0;
++  }
++  fprintf(stderr,"Actual crop settings: %d, %d, %d, %d", newcrop.c.left, newcrop.c.top,
++          newcrop.c.width, newcrop.c.height);
++err0:
++  return retval;
++}
++
++BOOL mfw_v4l2_display_init(MFW_V4L_INFO_T * v4l_info,
++    unsigned int disp_width, unsigned int disp_height)
++{
++
++  BOOL retVal = TRUE;
++  unsigned int width, height;
++
++  if ((v4l_info->width == -1) || (v4l_info->height == -1)) {
++    fprintf(stderr, "Still not get the video information");
++    return FALSE;
++  }
++  retVal = mfw_v4l2_open (v4l_info);
++  if (!retVal)
++    return FALSE;
++
++  width = (disp_width >> 3) << 3;
++  height = (disp_height >> 3) << 3;
++  if (width == 0) {
++    fprintf(stderr, "Wrong display width information\n");
++    width = v4l_info->fullscreen_width;
++  }
++  if (height == 0) {
++    fprintf(stderr, "Wrong display height information\n");
++    height = v4l_info->fullscreen_height;
++  }
++
++  return (mfw_v4l2_set_crop (v4l_info, width, height));
++}
++
++void mfw_v4l_finalize(MFW_V4L_INFO_T * v4l_info)
++{
++     if( v4l_info->shmid == -1)
++	  shmdt(v4l_info->shm); 
++     v4l_info->shmid = -1;
++     v4l_info->shm = NULL;
++	 fprintf(stderr, "shmdt finalize\n");  
++
++    mfw_v4l2_streamoff(v4l_info);
++	
++    mfw_v4l2_free_buffers(v4l_info);
++
++    mfw_fb0_close(&v4l_info->fd_fb);
++
++    mfw_v4l_close(v4l_info);
++}
++
++#endif
+diff --git a/media/filters/video_renderer_impl.cc b/media/filters/video_renderer_impl.cc
+index 1bd3f27..5b651dd 100644
+--- a/media/filters/video_renderer_impl.cc
++++ b/media/filters/video_renderer_impl.cc
+@@ -16,6 +16,10 @@
+ #include "media/base/limits.h"
+ #include "media/base/pipeline.h"
+ #include "media/base/video_frame.h"
++#include "stdio.h"
++#include "base/strings/stringize_macros.h"
++
++#define OVERLAY_PATH "OVERLAY_PATH"
+ 
+ namespace media {
+ 
+@@ -46,6 +50,9 @@ VideoRendererImpl::VideoRendererImpl(
+       frames_decoded_(0),
+       frames_dropped_(0),
+       is_shutting_down_(false),
++      environment_(base::Environment::Create()),
++      overlay_path(false),
++      first_frame(true),
+       weak_factory_(this) {
+   DCHECK(!paint_cb_.is_null());
+ }
+@@ -138,6 +145,13 @@ void VideoRendererImpl::Initialize(DemuxerStream* stream,
+   get_time_cb_ = get_time_cb;
+   state_ = kInitializing;
+ 
++  std::string temp;
++  if(environment_->GetVar(STRINGIZE_NO_EXPANSION(OVERLAY_PATH),&temp)){
++      VLOG(1) << "overlay path value is " << temp << "from environment variable";
++  if(temp == "1")
++      overlay_path = true;
++   }  
++
+   video_frame_stream_->Initialize(
+       stream,
+       low_delay,
+@@ -256,7 +270,22 @@ void VideoRendererImpl::ThreadMain() {
+     //
+     // At this point enough time has passed that the next frame that ready for
+     // rendering.
+-    PaintNextReadyFrame_Locked();
++
++/*zhaolin: add to support overlay path*/
++#if 1
++      if(overlay_path){
++	    if(first_frame)
++		  PaintNextReadyFrame_Locked();
++	    else
++		  DropNextReadyFrame_Locked();
++      	}
++	else
++	  PaintNextReadyFrame_Locked();
++	
++	first_frame = false;
++#endif
++	
++     //PaintNextReadyFrame_Locked();
+   }
+ }
+ 
+@@ -362,7 +391,11 @@ void VideoRendererImpl::TransitionToHaveEnough_Locked() {
+   if (!ready_frames_.empty()) {
+     // Because the clock might remain paused in for an undetermined amount
+     // of time (e.g., seeking while paused), paint the first frame.
+-    PaintNextReadyFrame_Locked();
++    //PaintNextReadyFrame_Locked();
++    /*zhaolin: add to support overlay path*/
++#if 1
++	DropNextReadyFrame_Locked();
++#endif
+   }
+ 
+   buffering_state_ = BUFFERING_HAVE_ENOUGH;
+diff --git a/media/filters/video_renderer_impl.h b/media/filters/video_renderer_impl.h
+index 557a884..1899581 100644
+--- a/media/filters/video_renderer_impl.h
++++ b/media/filters/video_renderer_impl.h
+@@ -22,6 +22,7 @@
+ #include "media/base/video_frame.h"
+ #include "media/base/video_renderer.h"
+ #include "media/filters/decoder_stream.h"
++#include "base/environment.h"
+ 
+ namespace base {
+ class SingleThreadTaskRunner;
+@@ -115,7 +116,6 @@ class MEDIA_EXPORT VideoRendererImpl
+   void UpdateStatsAndWait_Locked(base::TimeDelta wait_duration);
+ 
+   scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
+-
+   // Used for accessing data members.
+   base::Lock lock_;
+ 
+@@ -209,6 +209,11 @@ class MEDIA_EXPORT VideoRendererImpl
+ 
+   // NOTE: Weak pointers must be invalidated before all other member variables.
+   base::WeakPtrFactory<VideoRendererImpl> weak_factory_;
++   
++  /*Adam Zhu: get an environment to control overlay path*/
++  scoped_ptr < base::Environment> environment_;
++  bool first_frame;
++  bool overlay_path;
+ 
+   DISALLOW_COPY_AND_ASSIGN(VideoRendererImpl);
+ };
+-- 
+2.3.7
+

@@ -1,0 +1,85 @@
+From f885031b42351619015b1714a598d3cc1016d37a Mon Sep 17 00:00:00 2001
+From: EminZhang <EminZhang@viatech.com.cn>
+Date: Mon, 26 Jan 2015 16:45:13 +0800
+Subject: [PATCH] Modify those two files for owl-video.
+
+---
+ libowl-av/owl-video-widget.c | 21 ---------------------
+ libowl-av/owl-video-widget.h | 22 +++++++++++++++++++++-
+ 2 files changed, 21 insertions(+), 22 deletions(-)
+
+diff --git a/libowl-av/owl-video-widget.c b/libowl-av/owl-video-widget.c
+index e200155..a53e78b 100644
+--- a/libowl-av/owl-video-widget.c
++++ b/libowl-av/owl-video-widget.c
+@@ -38,27 +38,6 @@ G_DEFINE_TYPE (OwlVideoWidget,
+                owl_video_widget,
+                GTK_TYPE_BIN);
+ 
+-struct _OwlVideoWidgetPrivate {
+-        GstElement *playbin;
+-        GstXOverlay *overlay;
+-
+-        GMutex *overlay_lock;
+-
+-        GdkWindow *dummy_window;
+-
+-        char *uri;
+-
+-        gboolean can_seek;
+-
+-        int buffer_percent;
+-
+-        int duration;
+-
+-        gboolean force_aspect_ratio;
+-
+-        guint tick_timeout_id;
+-};
+-
+ enum {
+         PROP_0,
+         PROP_URI,
+diff --git a/libowl-av/owl-video-widget.h b/libowl-av/owl-video-widget.h
+index 7bb936f..549bdaf 100644
+--- a/libowl-av/owl-video-widget.h
++++ b/libowl-av/owl-video-widget.h
+@@ -24,7 +24,7 @@
+ 
+ #include <gtk/gtkbin.h>
+ #include <gst/gsttaglist.h>
+-
++#include <gst/interfaces/xoverlay.h>
+ G_BEGIN_DECLS
+ 
+ #define OWL_TYPE_VIDEO_WIDGET \
+@@ -50,6 +50,26 @@ G_BEGIN_DECLS
+ 
+ typedef struct _OwlVideoWidgetPrivate OwlVideoWidgetPrivate;
+ 
++struct _OwlVideoWidgetPrivate {
++        GstElement *playbin;
++        GstXOverlay *overlay;
++
++        GMutex *overlay_lock;
++
++        GdkWindow *dummy_window;
++        char *uri;
++
++        gboolean can_seek;
++
++        int buffer_percent;
++
++        int duration;
++
++        gboolean force_aspect_ratio;
++
++        guint tick_timeout_id;
++};
++
+ typedef struct {
+         GtkBin parent;
+ 
+-- 
+2.5.2
+

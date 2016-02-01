@@ -1,0 +1,20 @@
+#!/bin/sh
+
+export CHROME_DEVEL_SANDBOX=/usr/sbin/chrome-devel-sandbox
+export LD_LIBRARY_PATH=/usr/lib/chrome
+export GOOGLE_API_KEY="no"
+export GOOGLE_DEFAULT_CLIENT_ID="no"
+export GOOGLE_DEFAULT_CLIENT_SECRET="no"
+
+CHROME_EXTRA_ARGS=""
+if [ "${USER}" = "root" ] ; then
+    if [ -e /media/mmcblk0p5 ] ; then
+        CHROME_EXTRA_ARGS="${CHROME_EXTRA_ARGS} --user-data-dir=/media/mmcblk0p5/.chromium/"
+    else
+        echo "Cannot find the media/mmcblk0p5";
+        CHROME_EXTRA_ARGS="${CHROME_EXTRA_ARGS} --user-data-dir=${HOME}/.chromium/"
+    fi
+
+fi
+
+/usr/bin/chrome/chrome ${CHROME_EXTRA_ARGS} $@

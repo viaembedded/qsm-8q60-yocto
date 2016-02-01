@@ -1,0 +1,103 @@
+From 33bab8b424195c695529bae96a0a247d25d2919a Mon Sep 17 00:00:00 2001
+From: AdamZhu <AdamZhu@viatech.com.cn>
+Date: Tue, 30 Jun 2015 14:20:03 +0800
+Subject: [PATCH] Fix the issue for garbage when work with overlay path
+
+---
+ cc/layers/video_layer_impl.cc | 28 +++++++++++++++++++++++-----
+ cc/layers/video_layer_impl.h  |  4 ++++
+ 2 files changed, 27 insertions(+), 5 deletions(-)
+
+diff --git a/cc/layers/video_layer_impl.cc b/cc/layers/video_layer_impl.cc
+index 0e3406a..eb08799 100644
+--- a/cc/layers/video_layer_impl.cc
++++ b/cc/layers/video_layer_impl.cc
+@@ -18,6 +18,10 @@
+ #include "cc/trees/proxy.h"
+ #include "media/base/video_frame.h"
+ 
++#include "base/strings/stringize_macros.h"
++
++#define OVERLAY_PATH "OVERLAY_PATH"
++
+ #if defined(VIDEO_HOLE)
+ #include "cc/quads/solid_color_draw_quad.h"
+ #endif  // defined(VIDEO_HOLE)
+@@ -45,7 +49,9 @@ VideoLayerImpl::VideoLayerImpl(LayerTreeImpl* tree_impl,
+                                media::VideoRotation video_rotation)
+     : LayerImpl(tree_impl, id),
+       frame_(nullptr),
+-      video_rotation_(video_rotation) {
++      video_rotation_(video_rotation),
++      environment_(base::Environment::Create()),
++      overlay_path(false){
+ 
+   gfx::Size rotated_size = content_bounds();
+   gfx::Rect quad_rect(rotated_size);
+@@ -56,6 +62,13 @@ VideoLayerImpl::VideoLayerImpl(LayerTreeImpl* tree_impl,
+    shm = shmat(shmid, 0, 0);  
+    if(shm == (void*)-1)  
+       fprintf(stderr, "shmat failed\n");  
++   
++    std::string temp;
++  if(environment_->GetVar(STRINGIZE_NO_EXPANSION(OVERLAY_PATH),&temp)){
++      VLOG(1) << "overlay path value is " << temp << "from environment variable";
++  if(temp == "1")
++      overlay_path = true;
++   }  
+         
+ }
+ 
+@@ -202,7 +215,12 @@ void VideoLayerImpl::AppendQuads(RenderPass* render_pass,
+       occlusion_in_video_space.GetUnoccludedContentRect(quad_rect);
+   if (visible_quad_rect.IsEmpty())
+     return;
+-
++  
++  //AdamZhu: Set the texture size to o to invoid the garbage when use overlay path
++  if(overlay_path){
++  visible_quad_rect.set_width( 0 );
++  visible_quad_rect.set_height ( 0 );
++  }
+   // Pixels for macroblocked formats.
+   const float tex_width_scale =
+       static_cast<float>(visible_rect.width()) / coded_size.width();
+@@ -222,10 +240,10 @@ void VideoLayerImpl::AppendQuads(RenderPass* render_pass,
+  pos_info->y = static_cast<int>(float_rect.y());
+  pos_info->width = static_cast<int>(float_rect.width());
+  pos_info->height = static_cast<int>(float_rect.height());
+-//fprintf(stderr,"quads: %f,%f,%f,%f\n", float_rect.width(), float_rect.height(),
++// fprintf(stderr,"quads: %f,%f,%f,%f\n", float_rect.width(), float_rect.height(),
+ // 	float_rect.x(), float_rect.y());
+-// fprintf(stderr,"quads1: %d,%d,%d,%d \n", pos_info.x, pos_info.y,pos_info.width, pos_info.height);
+- //fprintf(stderr, "%s \n", screen_space_transform().ToString().c_str());
++// fprintf(stderr,"quads1: %d,%d,%d,%d \n", pos_info->x, pos_info->y,pos_info->width, pos_info->height);
++// fprintf(stderr, "%s \n", screen_space_transform().ToString().c_str());
+ 
+   switch (frame_resource_type_) {
+     // TODO(danakj): Remove this, hide it in the hardware path.
+diff --git a/cc/layers/video_layer_impl.h b/cc/layers/video_layer_impl.h
+index 6c06d36..d64d6a1 100644
+--- a/cc/layers/video_layer_impl.h
++++ b/cc/layers/video_layer_impl.h
+@@ -12,6 +12,7 @@
+ #include "cc/resources/release_callback_impl.h"
+ #include "cc/resources/video_resource_updater.h"
+ #include "media/base/video_rotation.h"
++#include "base/environment.h"
+ 
+ namespace media {
+ class VideoFrame;
+@@ -82,6 +83,9 @@ class CC_EXPORT VideoLayerImpl : public LayerImpl {
+   int shmid;
+   void *shm;
+ 
++  /*Adam Zhu: get an environment to control overlay path*/
++  scoped_ptr < base::Environment> environment_;
++  bool overlay_path;
+   DISALLOW_COPY_AND_ASSIGN(VideoLayerImpl);
+ };
+ 
+-- 
+2.3.7
+

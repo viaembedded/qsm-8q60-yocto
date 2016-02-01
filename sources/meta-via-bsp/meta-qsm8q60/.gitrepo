@@ -1,0 +1,11 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = meta-via-arm
+	branch = qsm8q60_yocto1.6
+	commit = d9077b822684373d69128db8584347cc1b495883
+	parent = a5421980c4aa1b029e7bde763acefd4e446bb8f8
+	cmdver = 0.2.3

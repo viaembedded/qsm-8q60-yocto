@@ -1,0 +1,105 @@
+QSM-8Q60 Linux BSP Pack                     Update date: 2015/11/09
+Version: v1.0.1
+
+
+Code Base
+==============
+U-boot 2014.04
+Kernel version: 3.10.53
+Distro: OpenEmbedded-core built by Yocto 1.6 (Daisy)
+
+
+The functons
+==============
+* i.MX6DL
+* 2GB DDR3
+* 4GB eMMC
+* SPI ROM
+-- Winbond W25Q32FVSSIG 4Mb
+-- MXIC MX25L3206E 4Mb
+* Single display
+-- HDMI
+-- LVDS
+--- Dual Channel: AUO 22" G220SVN01.0 (1680x1050)
+--- Single Channel: AUO 10.4" G104XVN01.0 (1024x768)
+--- Single Channel: AUO 7" G070VW01 V0 (800x480)
+* Digital Audio
+-- HDMI audio out (S/PDIF)
+* Analog Audio
+-- Line-in
+-- Line-out
+-- MIC-in
+* LAN
+-- Wired 10/100M Lan module: KSZ9031RNX Gigabit Ethernet Transceiver 
+-- Wired 10/100M Lan module: AXIS USB Lan AXI88772
+* COM Port
+-- COM1: TX/RX only in DTE mode
+-- COM2: TX/RX only for debug console
+-- COM3: TX/RX only in DTE mode
+-- USB COM1: RS232 full functions / RS422 / RS485
+-- USB COM2: RS232 full functions / RS422 / RS485
+-- USB COM3: RS232 full functions / RS422 / RS485
+-- USB COM4: RS232 full functions / RS422 / RS485
+* Debug Port (Default COM2)
+* USB
+* USB Keyboard/Mouse wakeup
+* I2C
+* GPIO
+-- 32 GPIOs: Fintek F75113
+* Watch dog timer
+* FlexCAN
+* Video H/W decode/encode
+* Boot from SPI ROM or uSD
+* Mini-PCIe 
+* External IO
+-- MiniPCIe wireless module: EMIO-1541(VNT9485)
+-- USB wireless module: EMIO-1533(VNT9271)
+-- USB GPS module: EMIO-2550 (u-blox LISA ZU200)
+-- USB 3G module: EMIO-2550 (u-blox LISA ZU200)
+
+
+U-boot 2014.04
+==============
+u-boot.imx(v1.0.0): Made from Yocto
+
+
+Kernel version: 3.10.53
+==============
+uImage(v1.0.0): Made from Yocto
+
+
+Root file system
+==============
+OpenEmbedded-core w/ GUI built by Yocto
+
+
+uSD image
+==============
+via-image-gui-imx6qsm8q60.sdcard: Made from Yocto
+
+
+Change log
+==========
+2015/11/09
+Version: QSM-8Q60 Linux BSP Pack v1.0.1
+
+* Select FlexCan option for kernel driver
+* Disable autostart touching calibration function to solve touch issue
+* Fix HDMI hotplug issue - display abnormally when first hogplug after booting the system
+* Support Yocto boot screen when displaying LVDS panel
+* Support LVDS - Dual Channel: AUO 22" G220SVN01.0 (1680x1050)
+* Improve redraw colorkey patch for videoplayer
+* Set Line-Out as default audio output
+* Set performance to CPU frequency scaling governors on rc.local file
+
+Known Issues:
+* Audio has the noise after play files, reboot, and shutdown the system
+* The Ethernet items (wired lan) of Connection Manager applet (on Yocto Desktop) is not friendly to operate the setting
+
+
+2015/09/23
+Version: QSM-8Q60 HMI Solution Pack v1.0.0
+
+Known Issues:
+* LVDS touch cannot work after booting the system.
+  it will work well if reconnecting USB touch.

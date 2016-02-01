@@ -1,0 +1,108 @@
+From 72513600b398bfae17217d09697ff311405c86a8 Mon Sep 17 00:00:00 2001
+From: FelixWei <FelixWei@viatech.com.cn>
+Date: Wed, 28 Oct 2015 14:56:05 +0800
+Subject: [PATCH] improve redraw colorkey when drag videoplayer open file menu
+
+---
+ src/misc/v4l_sink/src/mfw_gst_v4l_xlib.c | 54 ++++++++++++++++++--------------
+ src/misc/v4l_sink/src/mfw_gst_v4lsink.c  |  2 +-
+ 2 files changed, 31 insertions(+), 25 deletions(-)
+
+diff --git a/src/misc/v4l_sink/src/mfw_gst_v4l_xlib.c b/src/misc/v4l_sink/src/mfw_gst_v4l_xlib.c
+index 752e284..d87b3ea 100644
+--- a/src/misc/v4l_sink/src/mfw_gst_v4l_xlib.c
++++ b/src/misc/v4l_sink/src/mfw_gst_v4l_xlib.c
+@@ -49,7 +49,11 @@
+ /*=============================================================================
+                              STATIC VARIABLES
+ =============================================================================*/
+-extern gboolean colorkey_flag;
++static gboolean colorkey_flag;
++static guint8 colorkey_counter = 0;
++static guint drag_counter = 0;
++static guint drag_counter_new = 0;
++static guint drag_counter_old = 0;
+ /*=============================================================================
+                              GLOBAL VARIABLES
+ =============================================================================*/
+@@ -328,39 +332,41 @@ mfw_gst_xv4l2_event_thread (MFW_GST_V4LSINK_INFO_T *v4l_info)
+        
+         if ( (v4l_info->gstXInfo) && (v4l_info->gstXInfo->xwindow) &&
+             (v4l_info->gstXInfo->xwindow->win != 0))  {
++
+ 			GstXInfo *gstXInfo = v4l_info->gstXInfo;
+             Display * const dpy = gstXInfo->xcontext->disp;
+             const Window xid = gstXInfo->xwindow->win;
+             GC vo_gc;
+-
+ 			XEvent event;
+-	    //    XLockDisplay (dpy);
+-		g_mutex_lock (v4l_info->gstXInfo->x_lock);
+-	    /*    while(XCheckWindowEvent (dpy,xid,PointerMotionMask |
+-								  EnterWindowMask |
+-								  ExposureMask |
+-								  StructureNotifyMask,&event))
+-	           {
+- 
+-		      vo_gc = XCreateGC( dpy ,xid, 0, NULL);
+-		      XSetForeground( dpy, vo_gc, 0x010203);
+-		      XFillRectangle( dpy, xid, vo_gc,
++		    g_mutex_lock (v4l_info->gstXInfo->x_lock);
++            if (colorkey_flag) {
++		        vo_gc = XCreateGC( dpy ,xid, 0, NULL);
++		        XSetForeground( dpy, vo_gc, 0x010203);
++		        XFillRectangle( dpy, xid, vo_gc,
+ 						 0, 0,
+ 						 v4l_info->disp_width, 
+ 						 v4l_info->disp_height);
+-	//	      XUnlockDisplay (dpy);
+-		
+- 
+-            	  }		*/
+-	         if(XCheckWindowEvent (dpy,xid,PointerMotionMask |
++                colorkey_counter++;
++                if (colorkey_counter > 4) {
++                    colorkey_flag = FALSE;
++                    colorkey_counter = 0;
++                }
++            }		
++	        if(XCheckWindowEvent (dpy,xid,PointerMotionMask |
+ 								  EnterWindowMask |
+ 								  ExposureMask |
+-								  StructureNotifyMask,&event))
+-			colorkey_flag = TRUE;
+-		
+-		g_mutex_unlock (v4l_info->gstXInfo->x_lock);
+-
+-			
++								  StructureNotifyMask,&event)) {
++                drag_counter++;
++            }
++            drag_counter_old = drag_counter_new;
++            drag_counter_new = drag_counter;
++            if (drag_counter && drag_counter_old == drag_counter_new) {
++			    colorkey_flag = TRUE;
++                drag_counter = 0;
++                drag_counter_old = 0;
++                drag_counter_new = 0;
++            }
++		    g_mutex_unlock (v4l_info->gstXInfo->x_lock);
+ 
+             g_mutex_unlock(v4l_info->flow_lock);
+             /* Release the mutex which could be used in navigation event */
+diff --git a/src/misc/v4l_sink/src/mfw_gst_v4lsink.c b/src/misc/v4l_sink/src/mfw_gst_v4lsink.c
+index 60a2d6a..0f2138d 100644
+--- a/src/misc/v4l_sink/src/mfw_gst_v4lsink.c
++++ b/src/misc/v4l_sink/src/mfw_gst_v4lsink.c
+@@ -84,7 +84,7 @@ dprintf (FILE * fp, const char *file, size_t line, int enable,
+                              STATIC VARIABLES
+ =============================================================================*/
+ 
+- gboolean colorkey_flag = FALSE;
++static gboolean colorkey_flag = FALSE;
+ static guint8 colorkey_count = 0;
+ /*=============================================================================
+                              SUSPEND SUPPORT
+-- 
+2.6.2
+

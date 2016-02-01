@@ -1,0 +1,2090 @@
+diff --git a/arch/arm/kernel/process.c b/arch/arm/kernel/process.c
+index e59e24a..99d8b11 100644
+--- a/arch/arm/kernel/process.c
++++ b/arch/arm/kernel/process.c
+@@ -210,7 +210,8 @@ void machine_halt(void)
+ 	smp_send_stop();
+ 
+ 	local_irq_disable();
+-	while (1);
++	if (pm_power_off)
++		pm_power_off();
+ }
+ 
+ /*
+diff --git a/arch/arm/mach-imx/mach-imx6q.c b/arch/arm/mach-imx/mach-imx6q.c
+index 05366ad..7ce7871 100644
+--- a/arch/arm/mach-imx/mach-imx6q.c
++++ b/arch/arm/mach-imx/mach-imx6q.c
+@@ -38,10 +38,14 @@
+ #include <asm/mach/map.h>
+ #include <asm/system_misc.h>
+ 
++#include <linux/printk.h>
++
+ #include "common.h"
+ #include "cpuidle.h"
+ #include "hardware.h"
+ 
++#define IMX6Q_FEC_COMPATIBLE "fsl,imx6q-fec"
++
+ static struct flexcan_platform_data flexcan_pdata[2];
+ static int flexcan_en_gpio;
+ static int flexcan_stby_gpio;
+@@ -56,19 +60,19 @@ static void mx6q_flexcan_switch(void)
+ 		 * after board power up. So we set the EN/STBY initial state to low
+ 		 * first then to high to guarantee the state transition successfully.
+ 		 */
+-		gpio_set_value_cansleep(flexcan_en_gpio, 0);
+-		gpio_set_value_cansleep(flexcan_stby_gpio, 0);
++		//gpio_set_value_cansleep(flexcan_en_gpio, 0);
++		//gpio_set_value_cansleep(flexcan_stby_gpio, 0);
+ 
+-		gpio_set_value_cansleep(flexcan_en_gpio, 1);
+-		gpio_set_value_cansleep(flexcan_stby_gpio, 1);
++		//gpio_set_value_cansleep(flexcan_en_gpio, 1);
++		//gpio_set_value_cansleep(flexcan_stby_gpio, 1);
+ 	} else {
+ 		/*
+ 		 * avoid to disable CAN xcvr if any of the CAN interfaces
+ 		 * are down. XCRV will be disabled only if both CAN2
+ 		 * interfaces are DOWN.
+ 		*/
+-		gpio_set_value_cansleep(flexcan_en_gpio, 0);
+-		gpio_set_value_cansleep(flexcan_stby_gpio, 0);
++		//gpio_set_value_cansleep(flexcan_en_gpio, 0);
++		//gpio_set_value_cansleep(flexcan_stby_gpio, 0);
+ 	}
+ }
+ 
+@@ -132,10 +136,44 @@ static void mmd_write_reg(struct phy_device *dev, int device, int reg, int val)
+ 
+ static int ksz9031rn_phy_fixup(struct phy_device *dev)
+ {
++	struct device_node *enet_np;
++	const u8* macaddr;
++	int prop_len, val;
++	
++	enet_np = of_find_compatible_node(NULL, NULL, IMX6Q_FEC_COMPATIBLE);
++	macaddr = of_get_property(enet_np, "local-mac-address", &prop_len);
++	
++	if(macaddr == NULL || prop_len != 6) {
++		pr_alert("machine: MAC not found\n");
++	}
++	else {
++		int lower_mac = ((macaddr[4] << 8) + macaddr[5]) & 0xffff;
++		int middle_mac = ((macaddr[2] << 8) + macaddr[3]) & 0xffff;
++		int upper_mac = ((macaddr[0] << 8) + macaddr[1]) & 0xffff;
++
++		phy_write(dev, 0xd, 0x2);
++		phy_write(dev, 0xe, 0x2);
++		phy_write(dev, 0xd, 0x4002);
++		val = phy_read(dev, 0xe);
++		val |= 0x400;
++		mmd_write_reg(dev, 0x2, 0x2, val);
++
++		mmd_write_reg(dev, 0x2, 0x10, 0x8040);
++		mmd_write_reg(dev, 0x2, 0x11, lower_mac);
++		mmd_write_reg(dev, 0x2, 0x12, middle_mac);
++		mmd_write_reg(dev, 0x2, 0x13, upper_mac);
++		
++		phy_write(dev, 0xd, 0x2);
++		phy_write(dev, 0xe, 0x10);
++		phy_write(dev, 0xd, 0x8002);
++		val = phy_read(dev, 0xe);
++	}
++
+ 	/*
+ 	 * min rx data delay, max rx/tx clock delay,
+ 	 * min rx/tx control delay
+ 	 */
++
+ 	mmd_write_reg(dev, 2, 4, 0);
+ 	mmd_write_reg(dev, 2, 5, 0);
+ 	mmd_write_reg(dev, 2, 8, 0x003ff);
+@@ -220,10 +258,12 @@ static void __init imx6q_csi_mux_init(void)
+ 	gpr = syscon_regmap_lookup_by_compatible("fsl,imx6q-iomuxc-gpr");
+ 	if (!IS_ERR(gpr)) {
+ 		if (of_machine_is_compatible("fsl,imx6q-sabresd") ||
+-			of_machine_is_compatible("fsl,imx6q-sabreauto"))
++			of_machine_is_compatible("fsl,imx6q-sabreauto") ||
++			of_machine_is_compatible("via,imx6q-qsm8q60"))
+ 			regmap_update_bits(gpr, IOMUXC_GPR1, 1 << 19, 1 << 19);
+ 		else if (of_machine_is_compatible("fsl,imx6dl-sabresd") ||
+-			 of_machine_is_compatible("fsl,imx6dl-sabreauto"))
++			of_machine_is_compatible("fsl,imx6dl-sabreauto") ||
++			of_machine_is_compatible("via,imx6dl-qsm8q60"))
+ 			regmap_update_bits(gpr, IOMUXC_GPR13, 0x3F, 0x0C);
+ 	} else {
+ 		pr_err("%s(): failed to find fsl,imx6q-iomux-gpr regmap\n",
+@@ -311,7 +351,7 @@ put_enet_node:
+ 
+ static inline void imx6q_enet_init(void)
+ {
+-	imx6_enet_mac_init("fsl,imx6q-fec");
++	imx6_enet_mac_init(IMX6Q_FEC_COMPATIBLE);
+ 	imx6q_enet_phy_init();
+ 	imx6q_1588_init();
+ }
+@@ -323,6 +363,33 @@ static const struct of_dev_auxdata imx6q_auxdata_lookup[] __initconst = {
+ 	{ /* sentinel */ }
+ };
+ 
++/* Chris Added: turn off led and hdmi when power off */
++static void turnoff_power_led(void)
++{
++	int power_led_gpio;
++	struct device_node *np;
++
++	np = of_find_node_by_path("/leds/power");
++	power_led_gpio = of_get_named_gpio(np, "power-led-gpio", 0);
++
++	gpio_request(power_led_gpio, "power-led");
++	gpio_direction_output(power_led_gpio, 0);
++}
++
++static void turnoff_hdmi(void)
++{
++	void __iomem *mx6_pwr_off = MX6Q_IO_ADDRESS(0x20c8130);
++	u32 value;
++	value = readl(mx6_pwr_off);
++	writel(value & 0xfffffffe, mx6_pwr_off);
++}
++
++static void mx6_poweroff(void)
++{
++	turnoff_power_led();
++	turnoff_hdmi();
++}
++
+ static void __init imx6q_init_machine(void)
+ {
+ 	struct device *parent;
+@@ -339,6 +406,7 @@ static void __init imx6q_init_machine(void)
+ 	imx_anatop_init();
+ 	imx6_pm_init();
+ 	imx6q_csi_mux_init();
++	pm_power_off = mx6_poweroff;
+ }
+ 
+ #define OCOTP_CFG3			0x440
+diff --git a/drivers/media/platform/mxc/capture/adv7180.c b/drivers/media/platform/mxc/capture/adv7180.c
+index e359e81..20fe568 100644
+--- a/drivers/media/platform/mxc/capture/adv7180.c
++++ b/drivers/media/platform/mxc/capture/adv7180.c
+@@ -44,6 +44,7 @@ static struct regulator *avdd_regulator;
+ static struct regulator *pvdd_regulator;
+ static int pwn_gpio;
+ 
++static void adv7180_hard_reset(bool cvbs);
+ static int adv7180_probe(struct i2c_client *adapter,
+ 			 const struct i2c_device_id *id);
+ static int adv7180_detach(struct i2c_client *client);
+@@ -484,6 +485,22 @@ static int ioctl_s_parm(struct v4l2_int_device *s, struct v4l2_streamparm *a)
+ 	switch (a->type) {
+ 	/* These are all the possible cases. */
+ 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
++		/* Select input from CVBS or S-Video */
++		switch (a->parm.raw_data[0]) {
++			case 1:
++				/* CVBS input on ANT3 */
++				adv7180_write_reg(ADV7180_INPUT_CTL, 0x04);
++				pr_err("ADV7180: Set input ot CVBS\n");
++				break;
++			case 2:
++				/* S-Video input, Y on ANT1, C on ANT2 */
++				adv7180_write_reg(ADV7180_INPUT_CTL, 0x06);
++				pr_err("ADV7180: Set input to S-Video\n");
++				break;
++			default:
++				pr_err("ADV7180: Unkown input select, set nothing\n");
++				break;
++		}
+ 	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
+ 	case V4L2_BUF_TYPE_VIDEO_OVERLAY:
+ 	case V4L2_BUF_TYPE_VBI_CAPTURE:
+@@ -924,13 +941,21 @@ static void adv7180_hard_reset(bool cvbs)
+ 
+ 	if (cvbs) {
+ 		/* Set CVBS input on AIN1 */
+-		adv7180_write_reg(ADV7180_INPUT_CTL, 0x00);
++		//adv7180_write_reg(ADV7180_INPUT_CTL, 0x00);
++
++		/* Chris Added: Set CVBS input on AIN3 */
++		adv7180_write_reg(ADV7180_INPUT_CTL, 0x04);
++		adv7180_write_reg(0x27, 0x58);
+ 	} else {
+ 		/*
+ 		 * Set YPbPr input on AIN1,4,5 and normal
+ 		 * operations(autodection of all stds).
+ 		 */
+-		adv7180_write_reg(ADV7180_INPUT_CTL, 0x09);
++		//adv7180_write_reg(ADV7180_INPUT_CTL, 0x09);
++
++		/* Chris Added: Set Y/C input on AIN1,2 and normal */
++		adv7180_write_reg(ADV7180_INPUT_CTL, 0x06);
++		adv7180_write_reg(0x27, 0x69);
+ 	}
+ 
+ 	/* Datasheet recommends */
+@@ -968,7 +993,7 @@ static void adv7180_hard_reset(bool cvbs)
+ 	adv7180_write_reg(0x24, 0x00);
+ 	adv7180_write_reg(0x25, 0x00);
+ 	adv7180_write_reg(0x26, 0x00);
+-	adv7180_write_reg(0x27, 0x58);
++//	adv7180_write_reg(0x27, 0x58);
+ 	adv7180_write_reg(0x28, 0x00);
+ 	adv7180_write_reg(0x29, 0x00);
+ 	adv7180_write_reg(0x2A, 0x00);
+diff --git a/drivers/media/platform/mxc/capture/mxc_v4l2_capture.c b/drivers/media/platform/mxc/capture/mxc_v4l2_capture.c
+index 0d10d28..d58517a 100755
+--- a/drivers/media/platform/mxc/capture/mxc_v4l2_capture.c
++++ b/drivers/media/platform/mxc/capture/mxc_v4l2_capture.c
+@@ -72,7 +72,7 @@ static int video_nr = -1;
+ 
+ /*! This data is used for the output to the display. */
+ #define MXC_V4L2_CAPTURE_NUM_OUTPUTS	6
+-#define MXC_V4L2_CAPTURE_NUM_INPUTS	2
++#define MXC_V4L2_CAPTURE_NUM_INPUTS	3
+ static struct v4l2_output mxc_capture_outputs[MXC_V4L2_CAPTURE_NUM_OUTPUTS] = {
+ 	{
+ 	 .index = 0,
+@@ -136,7 +136,16 @@ static struct v4l2_input mxc_capture_inputs[MXC_V4L2_CAPTURE_NUM_INPUTS] = {
+ 	 },
+ 	{
+ 	 .index = 1,
+-	 .name = "CSI MEM",
++	 .name = "CVBS", /* default "CSI MEM" */
++	 .type = V4L2_INPUT_TYPE_CAMERA,
++	 .audioset = 0,
++	 .tuner = 0,
++	 .std = V4L2_STD_UNKNOWN,
++	 .status = V4L2_IN_ST_NO_POWER,
++	 },
++	{ /* S-Video input */
++	 .index = 2,
++	 .name = "S-VIDEO",
+ 	 .type = V4L2_INPUT_TYPE_CAMERA,
+ 	 .audioset = 0,
+ 	 .tuner = 0,
+@@ -830,8 +839,8 @@ static int mxc_v4l2_s_fmt(cam_data *cam, struct v4l2_format *f)
+ 		 * Force the capture window resolution to be crop bounds
+ 		 * for CSI MEM input mode.
+ 		 */
+-		if (strcmp(mxc_capture_inputs[cam->current_input].name,
+-			   "CSI MEM") == 0) {
++		if (strcmp(mxc_capture_inputs[cam->current_input].name, "CVBS") == 0 ||
++			strcmp(mxc_capture_inputs[cam->current_input].name, "S-VIDEO") == 0) {
+ 			f->fmt.pix.width = cam->crop_current.width;
+ 			f->fmt.pix.height = cam->crop_current.height;
+ 		}
+@@ -1613,7 +1622,11 @@ static int mxc_v4l_open(struct file *file)
+ 					 cam->low_power == false);
+ 
+ 		if (strcmp(mxc_capture_inputs[cam->current_input].name,
+-			   "CSI MEM") == 0) {
++			   "CVBS") == 0) {
++#if defined(CONFIG_MXC_IPU_CSI_ENC) || defined(CONFIG_MXC_IPU_CSI_ENC_MODULE)
++			err = csi_enc_select(cam);
++#endif
++		} else if (strcmp(mxc_capture_inputs[cam->current_input].name, "S-VIDEO") == 0) {
+ #if defined(CONFIG_MXC_IPU_CSI_ENC) || defined(CONFIG_MXC_IPU_CSI_ENC_MODULE)
+ 			err = csi_enc_select(cam);
+ #endif
+@@ -1770,7 +1783,11 @@ static int mxc_v4l_close(struct file *file)
+ 		pr_debug("mxc_v4l_close: release resource\n");
+ 
+ 		if (strcmp(mxc_capture_inputs[cam->current_input].name,
+-			   "CSI MEM") == 0) {
++			   "CVBS") == 0) {
++#if defined(CONFIG_MXC_IPU_CSI_ENC) || defined(CONFIG_MXC_IPU_CSI_ENC_MODULE)
++			err |= csi_enc_deselect(cam);
++#endif
++		} else if (strcmp(mxc_capture_inputs[cam->current_input].name, "S-VIDEO") == 0) {
+ #if defined(CONFIG_MXC_IPU_CSI_ENC) || defined(CONFIG_MXC_IPU_CSI_ENC_MODULE)
+ 			err |= csi_enc_deselect(cam);
+ #endif
+@@ -1901,6 +1918,7 @@ static long mxc_v4l_do_ioctl(struct file *file,
+ 			    unsigned int ioctlnr, void *arg)
+ {
+ 	struct video_device *dev = video_devdata(file);
++	struct v4l2_streamparm inparm;
+ 	cam_data *cam = video_get_drvdata(dev);
+ 	int retval = 0;
+ 	unsigned long lock_flags;
+@@ -2336,8 +2354,22 @@ static long mxc_v4l_do_ioctl(struct file *file,
+ 							V4L2_IN_ST_NO_POWER;
+ 		}
+ 
+-		if (strcmp(mxc_capture_inputs[*index].name, "CSI MEM") == 0) {
++		if (strcmp(mxc_capture_inputs[*index].name, "CVBS") == 0) {
++#if defined(CONFIG_MXC_IPU_CSI_ENC) || defined(CONFIG_MXC_IPU_CSI_ENC_MODULE)
++			pr_err("MXC V4L2 Capture: Choose capture input CVBS\n");
++			inparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
++			inparm.parm.raw_data[0] = 1; /* input select flag of adv7180 */
++			vidioc_int_s_parm(cam->sensor, &inparm);
++			retval = csi_enc_select(cam);
++			if (retval)
++				break;
++#endif
++		} else if (strcmp(mxc_capture_inputs[*index].name, "S-VIDEO") == 0) {
+ #if defined(CONFIG_MXC_IPU_CSI_ENC) || defined(CONFIG_MXC_IPU_CSI_ENC_MODULE)
++			pr_err("MXC V4L2 Capture: Choose capture input S-Video\n");
++			inparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
++			inparm.parm.raw_data[0] = 2; /* input select flag of adv7180 */
++			vidioc_int_s_parm(cam->sensor, &inparm);
+ 			retval = csi_enc_select(cam);
+ 			if (retval)
+ 				break;
+diff --git a/drivers/media/platform/mxc/capture/mxc_v4l2_capture.h b/drivers/media/platform/mxc/capture/mxc_v4l2_capture.h
+index ae56f95..5817cae 100644
+--- a/drivers/media/platform/mxc/capture/mxc_v4l2_capture.h
++++ b/drivers/media/platform/mxc/capture/mxc_v4l2_capture.h
+@@ -40,7 +40,7 @@
+ #include <media/v4l2-int-device.h>
+ 
+ 
+-#define FRAME_NUM 10
++#define FRAME_NUM 30
+ #define MXC_SENSOR_NUM 2
+ 
+ enum imx_v4l2_devtype {
+diff --git a/drivers/mmc/card/block.c b/drivers/mmc/card/block.c
+index becf993..00fa3c7 100644
+--- a/drivers/mmc/card/block.c
++++ b/drivers/mmc/card/block.c
+@@ -96,6 +96,7 @@ struct mmc_blk_data {
+ #define MMC_BLK_CMD23	(1 << 0)	/* Can do SET_BLOCK_COUNT for multiblock */
+ #define MMC_BLK_REL_WR	(1 << 1)	/* MMC Reliable write support */
+ #define MMC_BLK_PACKED_CMD	(1 << 2)	/* MMC packed command support */
++#define MMC_BLK_SUSPENDED	(1 << 3)	/* MMC block device suspended */
+ 
+ 	unsigned int	usage;
+ 	unsigned int	read_only;
+@@ -106,6 +107,8 @@ struct mmc_blk_data {
+ #define MMC_BLK_WRITE		BIT(1)
+ #define MMC_BLK_DISCARD		BIT(2)
+ #define MMC_BLK_SECDISCARD	BIT(3)
++#define MMC_BLK_RPMB		BIT(4)
++#define MMC_BLK_USER		BIT(5)
+ 
+ 	/*
+ 	 * Only set in main mmc_blk_data associated
+@@ -146,6 +149,8 @@ static inline void mmc_blk_clear_packed(struct mmc_queue_req *mqrq)
+ 	packed->blocks = 0;
+ }
+ 
++static int mmc_rpmb_req_process(struct mmc_blk_data *, struct mmc_ioc_rpmb_req *);
++
+ static struct mmc_blk_data *mmc_blk_get(struct gendisk *disk)
+ {
+ 	struct mmc_blk_data *md;
+@@ -908,6 +913,116 @@ static inline void mmc_blk_reset_success(struct mmc_blk_data *md, int type)
+ 	md->reset_done &= ~type;
+ }
+ 
++static int mmc_rpmb_req_process(struct mmc_blk_data *md, struct mmc_ioc_rpmb_req *req)
++{
++	struct mmc_core_rpmb_req rpmb_req;
++	struct mmc_card *card = NULL;
++	int ret;
++
++	if (!md || !req)
++		return -EINVAL;	
++
++	if (!(md->flags &MMC_BLK_CMD23) || (md->part_type != EXT_CSD_PART_CONFIG_ACC_RPMB))
++		return -EOPNOTSUPP;
++
++	card = md->queue.card;
++	if (!card || !mmc_card_mmc(card) || !card->ext_csd.rpmb_size)
++		return -ENODEV;
++
++	memset(&rpmb_req, 0, sizeof(struct mmc_core_rpmb_req));
++	rpmb_req.req = req;
++	/* check request */
++	ret = mmc_rpmb_pre_frame(&rpmb_req, card);
++	if (ret) {
++		pr_err("%s: prepare frame failed\n", mmc_hostname(card->host));
++		return ret;
++	}
++
++	mmc_claim_host(card->host);
++
++	if (md->flags & MMC_BLK_SUSPENDED) {
++		pr_warn("%s: MMC block device is already suspended\n", mmc_hostname(card->host));
++		ret = -EPERM;
++		goto out;
++	}
++
++	/* wait for background operation finished */
++	mmc_stop_bkops(card);
++
++	/*
++	 * before start, let's change to RPMB partition first
++	 */
++
++	ret = mmc_blk_part_switch(card, md);
++	if (ret) {
++		pr_err("%s: Invalid RPMB partition switch (%d)!\n", mmc_hostname(card->host), ret);
++
++		/*
++		 * In case partition is not in user data area, make
++		 * a force partition switch.
++		 * we need reset eMMC card at here
++		 */
++
++		ret = mmc_blk_reset(md, card->host, MMC_BLK_RPMB);
++		if (!ret)
++			mmc_blk_reset_success(md, MMC_BLK_RPMB);
++		else
++			pr_err("%s: eMMC card reset failed (%d)\n", mmc_hostname(card->host), ret);
++		goto out;
++	}
++
++	ret = mmc_rpmb_partition_ops(&rpmb_req, card);
++	if (ret)
++		pr_err("%s: failed (%d) to handle RPMB request type (%d)!\n", mmc_hostname(card->host), ret, req->type);
++
++out:
++	mmc_release_host(card->host);
++	mmc_rpmb_post_frame(&rpmb_req);
++	return ret;
++}
++
++int mmc_access_rpmb(struct mmc_queue *mq)
++{
++	struct mmc_blk_data *md = mq->data;
++
++	/*
++	 * If this is a RPMB partition access, return true
++	 */
++
++	if (md && md->part_type == EXT_CSD_PART_CONFIG_ACC_RPMB)
++		return true;
++
++	return false;
++}
++EXPORT_SYMBOL_GPL(mmc_access_rpmb);
++
++int mmc_rpmb_req_handle(struct device *emmc, struct mmc_ioc_rpmb_req *req)
++{
++	int ret = 0;
++	struct gendisk *disk = NULL;
++	struct mmc_blk_data *md = NULL;
++
++	if (!emmc || !req)
++		return -EINVAL;
++
++	disk = dev_to_disk(emmc);
++	if (!disk) {
++		pr_err("%s: NO eMMC block data. Try it later\n", __func__);
++		return -ENODEV;
++	}
++
++	md = mmc_blk_get(disk);
++	if (!md) {
++		pr_err("%s: NO eMMC block data. Try it later\n", __func__);
++		return -ENODEV;
++	}
++	ret = mmc_rpmb_req_process(md, req);
++	mmc_blk_put(md);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mmc_rpmb_req_handle);
++
+ static int mmc_blk_issue_discard_rq(struct mmc_queue *mq, struct request *req)
+ {
+ 	struct mmc_blk_data *md = mq->data;
+@@ -1939,11 +2054,15 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
+ 
+ 	ret = mmc_blk_part_switch(card, md);
+ 	if (ret) {
+-		if (req) {
+-			blk_end_request_all(req, -EIO);
++		pr_err("%s: switch part failed. Try to reset eMMC\n", mmc_hostname(card->host));
++		if (mmc_blk_reset(md, card->host, MMC_BLK_USER)) {
++			if (req)
++				blk_end_request_all(req, -EIO);
++			ret = 0;
++			goto out;
+ 		}
+-		ret = 0;
+-		goto out;
++		pr_info("%s: Reset eMMC success\n", mmc_hostname(card->host));
++		mmc_blk_reset_success(md, MMC_BLK_USER);
+ 	}
+ 
+ 	mq->flags &= ~MMC_QUEUE_NEW_REQUEST;
+@@ -2414,6 +2533,18 @@ static int mmc_blk_suspend(struct mmc_card *card)
+ 		mmc_queue_suspend(&md->queue);
+ 		list_for_each_entry(part_md, &md->part, part) {
+ 			mmc_queue_suspend(&part_md->queue);
++			if (part_md->part_type == EXT_CSD_PART_CONFIG_ACC_RPMB) {
++				/*
++				 * RPMB partition is accessed by API directly.
++				 * Driver need to set a flag when suspending
++				 * MMC block device to notify API that the
++				 * accessing of RPMB partition needs to be
++				 * stopped
++				 */
++				mmc_claim_host(card->host);
++				part_md->flags |= MMC_BLK_SUSPENDED;
++				mmc_release_host(card->host);
++			}
+ 		}
+ 	}
+ 	return 0;
+@@ -2433,6 +2564,17 @@ static int mmc_blk_resume(struct mmc_card *card)
+ 		mmc_queue_resume(&md->queue);
+ 		list_for_each_entry(part_md, &md->part, part) {
+ 			mmc_queue_resume(&part_md->queue);
++			if (part_md->part_type == EXT_CSD_PART_CONFIG_ACC_RPMB) {
++				/*
++				 * RPMB partition is accessed by API directly.
++				 * Driver need to clear MMC_BLK_SUSPENDED flag
++				 * to make sure the next RPMB partition access
++				 * request won't be blocked
++				 */
++				mmc_claim_host(card->host);
++				part_md->flags &= ~MMC_BLK_SUSPENDED;
++				mmc_release_host(card->host);
++			}
+ 		}
+ 	}
+ 	return 0;
+diff --git a/drivers/mmc/card/queue.c b/drivers/mmc/card/queue.c
+index 9447a0e..a83a3b8 100644
+--- a/drivers/mmc/card/queue.c
++++ b/drivers/mmc/card/queue.c
+@@ -37,7 +37,8 @@ static int mmc_prep_request(struct request_queue *q, struct request *req)
+ 		return BLKPREP_KILL;
+ 	}
+ 
+-	if (mq && mmc_card_removed(mq->card))
++	/* if (mq && mmc_card_removed(mq->card)) */
++	if (mq && (mmc_card_removed(mq->card) || mmc_access_rpmb(mq)))
+ 		return BLKPREP_KILL;
+ 
+ 	req->cmd_flags |= REQ_DONTPREP;
+diff --git a/drivers/mmc/card/queue.h b/drivers/mmc/card/queue.h
+index 5752d50..3bbd4e6 100644
+--- a/drivers/mmc/card/queue.h
++++ b/drivers/mmc/card/queue.h
+@@ -73,4 +73,5 @@ extern void mmc_queue_bounce_post(struct mmc_queue_req *);
+ extern int mmc_packed_init(struct mmc_queue *, struct mmc_card *);
+ extern void mmc_packed_clean(struct mmc_queue *);
+ 
++extern int mmc_access_rpmb(struct mmc_queue *);
+ #endif
+diff --git a/drivers/mmc/core/mmc.c b/drivers/mmc/core/mmc.c
+index bc60d05..529b602 100644
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -293,7 +293,7 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
+ 	}
+ 
+ 	card->ext_csd.rev = ext_csd[EXT_CSD_REV];
+-	if (card->ext_csd.rev > 6) {
++	if (card->ext_csd.rev > 7) {
+ 		pr_err("%s: unrecognised EXT_CSD revision %d\n",
+ 			mmc_hostname(card->host), card->ext_csd.rev);
+ 		err = -EINVAL;
+@@ -501,6 +501,10 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
+ 		 * RPMB regions are defined in multiples of 128K.
+ 		 */
+ 		card->ext_csd.raw_rpmb_size_mult = ext_csd[EXT_CSD_RPMB_MULT];
++
++		card->ext_csd.rpmb_size = 128 * card->ext_csd.raw_rpmb_size_mult;
++		card->ext_csd.rpmb_size <<= 2; /* Unit: half sector */
++
+ 		if (ext_csd[EXT_CSD_RPMB_MULT] && mmc_host_cmd23(card->host)) {
+ 			mmc_part_add(card, ext_csd[EXT_CSD_RPMB_MULT] << 17,
+ 				EXT_CSD_PART_CONFIG_ACC_RPMB,
+@@ -552,6 +556,18 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
+ 		card->ext_csd.data_sector_size = 512;
+ 	}
+ 
++	/*
++	 * If use legacy relaible write, then the blk counts must not
++	 * big than the relaible write sectors
++	 */
++	if (!(card->ext_csd.rel_param & EXT_CSD_WR_REL_PARAM_EN)) {
++		if (card->ext_csd.rel_sectors < RPMB_AVALIABLE_SECTORS)
++			card->rpmb_max_req = card->ext_csd.rel_sectors;
++		else
++			card->rpmb_max_req = RPMB_AVALIABLE_SECTORS;
++} else
++		card->rpmb_max_req = RPMB_AVALIABLE_SECTORS;
++
+ out:
+ 	return err;
+ }
+@@ -1005,6 +1021,7 @@ MMC_DEV_ATTR(enhanced_area_offset, "%llu\n",
+ MMC_DEV_ATTR(enhanced_area_size, "%u\n", card->ext_csd.enhanced_area_size);
+ MMC_DEV_ATTR(raw_rpmb_size_mult, "%#x\n", card->ext_csd.raw_rpmb_size_mult);
+ MMC_DEV_ATTR(rel_sectors, "%#x\n", card->ext_csd.rel_sectors);
++MMC_DEV_ATTR(rpmb_size, "%d\n", card->ext_csd.rpmb_size);
+ DEVICE_ATTR(boot_info, S_IRUGO, mmc_boot_info_show, NULL);
+ DEVICE_ATTR(boot_config, S_IWUGO, NULL, setup_boot_partitions);
+ DEVICE_ATTR(boot_bus_config, S_IWUGO, NULL, setup_boot_bus);
+@@ -1026,6 +1043,7 @@ static struct attribute *mmc_std_attrs[] = {
+ 	&dev_attr_enhanced_area_size.attr,
+ 	&dev_attr_raw_rpmb_size_mult.attr,
+ 	&dev_attr_rel_sectors.attr,
++	&dev_attr_rpmb_size.attr,
+ 	&dev_attr_boot_info.attr,
+ 	&dev_attr_boot_config.attr,
+ 	&dev_attr_boot_bus_config.attr,
+diff --git a/drivers/mmc/core/mmc_ops.c b/drivers/mmc/core/mmc_ops.c
+index 83d17a9..bc0d241 100644
+--- a/drivers/mmc/core/mmc_ops.c
++++ b/drivers/mmc/core/mmc_ops.c
+@@ -644,3 +644,793 @@ int mmc_send_hpi_cmd(struct mmc_card *card, u32 *status)
+ 
+ 	return 0;
+ }
++
++static int mmc_rpmb_send_command(struct mmc_card *card, u8 *buf, __u16 blks,
++
++		__u16 type, u8 req_type)
++
++{
++
++	struct mmc_request mrq = {NULL};
++
++	struct mmc_command cmd = {0};
++
++	struct mmc_command sbc = {0};
++
++	struct mmc_data data = {0};
++
++	struct scatterlist sg;
++
++	u8 *transfer_buf = NULL;
++
++
++
++	mrq.sbc = &sbc;
++
++	mrq.cmd = &cmd;
++
++	mrq.data = &data;
++
++	mrq.stop = NULL;
++
++	transfer_buf = kzalloc(512 * blks, GFP_KERNEL);
++
++	if (!transfer_buf)
++
++		return -ENOMEM;
++
++
++
++	/*
++
++	 * set CMD23
++
++	 */
++
++	sbc.opcode = MMC_SET_BLOCK_COUNT;
++
++	sbc.arg = blks;
++
++	if ((req_type == RPMB_REQ) && type == RPMB_WRITE_DATA)
++
++		sbc.arg |= 1 << 31;
++
++	sbc.flags = MMC_RSP_R1 | MMC_CMD_AC;
++
++
++
++	/*
++
++	 * set CMD25/18
++
++	 */
++
++	sg_init_one(&sg, transfer_buf, 512 * blks);
++
++	if (req_type == RPMB_REQ) {
++
++		cmd.opcode = MMC_WRITE_MULTIPLE_BLOCK;
++
++		sg_copy_from_buffer(&sg, 1, buf, 512 * blks);
++
++		data.flags |= MMC_DATA_WRITE;
++
++	} else {
++
++		cmd.opcode = MMC_READ_MULTIPLE_BLOCK;
++
++		data.flags |= MMC_DATA_READ;
++
++	}
++
++	cmd.arg = 0;
++
++	cmd.flags = MMC_RSP_R1 | MMC_CMD_ADTC;
++
++	data.blksz = 512;
++
++	data.blocks = blks;
++
++	data.sg = &sg;
++
++	data.sg_len = 1;
++
++
++
++	mmc_set_data_timeout(&data, card);
++
++
++
++	mmc_wait_for_req(card->host, &mrq);
++
++
++
++	if (req_type != RPMB_REQ)
++
++		sg_copy_to_buffer(&sg, 1, buf, 512 * blks);
++
++
++
++	kfree(transfer_buf);
++
++
++
++	if (cmd.error)
++
++		return cmd.error;
++
++	if (data.error)
++
++		return data.error;
++
++	return 0;
++
++}
++
++
++
++void mmc_rpmb_post_frame(struct mmc_core_rpmb_req *rpmb_req)
++
++{
++
++	int i;
++
++	struct mmc_ioc_rpmb_req *p_req;
++
++	__u8 *buf_frame;
++
++
++
++	if (!rpmb_req || !rpmb_req->ready)
++
++		return;
++
++
++
++	p_req = rpmb_req->req;
++
++	buf_frame = rpmb_req->frame;
++
++
++
++	if (!p_req || !buf_frame)
++
++		return;
++
++	/*
++
++	 * Regarding to the check rules, here is the post
++
++	 * rules
++
++	 * All will return result.
++
++	 * GET_WRITE_COUNTER:
++
++	 *              must: write counter, nonce
++
++	 *              optional: MAC
++
++	 * WRITE_DATA:
++
++	 *              must: MAC, write counter
++
++	 * READ_DATA:
++
++	 *              must: nonce, data
++
++	 *              optional: MAC
++
++	 * PROGRAM_KEY:
++
++	 *              must: Nothing
++
++	 *
++
++	 * Except READ_DATA, all of these operations only need to parse
++
++	 * one frame. READ_DATA needs blks frames to get DATA
++
++	 */
++
++
++
++	memcpy(p_req->result, buf_frame + RPMB_RES_BEG, 2);
++
++	*p_req->result = be16_to_cpup(p_req->result);
++
++
++
++	if (p_req->type == RPMB_PROGRAM_KEY)
++
++		goto out;
++
++
++
++	if (p_req->type == RPMB_GET_WRITE_COUNTER ||
++
++			p_req->type == RPMB_WRITE_DATA) {
++
++		memcpy(p_req->wc, buf_frame + RPMB_WCOUNTER_BEG, 4);
++
++		*p_req->wc = be32_to_cpup(p_req->wc);
++
++	}
++
++
++
++	if (p_req->type == RPMB_GET_WRITE_COUNTER ||
++
++			p_req->type == RPMB_READ_DATA) {
++
++		/* nonce copy */
++
++		memcpy(p_req->nonce, buf_frame + RPMB_NONCE_BEG, 16);
++
++	}
++
++	/*
++
++	 * Take MAC within the last package
++
++	 */
++
++	if (p_req->type == RPMB_READ_DATA) {
++
++		__u8 *data = p_req->data;
++
++		for (i = 0; i < p_req->blk_cnt; i++) {
++
++			memcpy(data, buf_frame + i * 512 + RPMB_DATA_BEG, 256);
++
++			data += 256;
++
++		}
++
++		/*
++
++		 * MAC stored in the last package
++
++		 */
++
++		if (p_req->mac) {
++
++			i--;
++
++			memcpy(p_req->mac, buf_frame + i * 512 + RPMB_MAC_BEG,
++
++					32);
++
++		}
++
++	} else if (p_req->mac)
++
++		memcpy(p_req->mac, buf_frame + RPMB_MAC_BEG, 32);
++
++out:
++
++	kfree(buf_frame);
++
++	rpmb_req->frame = NULL;
++
++	return;
++
++}
++
++EXPORT_SYMBOL_GPL(mmc_rpmb_post_frame);
++
++
++
++static int mmc_rpmb_request_check(struct mmc_card *card,
++
++		struct mmc_ioc_rpmb_req *p_req)
++
++{
++
++	/*
++
++	 * Some paramter is a must for the operation. Different
++
++	 * operation expect different paramters. Below code is
++
++	 * used for checking this.
++
++	 *
++
++	 * All operations will need result.
++
++	 * GET_WRITE_COUNTER:
++
++	 *              must: write counter, nonce
++
++	 *              optional: MAC
++
++	 * WRITE_DATA:
++
++	 *              must: MAC, data, write counter
++
++	 * READ_DATA:
++
++	 *              must: nonce, data
++
++	 *              optional: MAC
++
++	 * PROGRAM_KEY:
++
++	 *              must: MAC
++
++	 *
++
++	 * So here, we only check the 'must' paramters
++
++	 */
++
++	if (!p_req->result) {
++
++		pr_err("%s: Type %d has NULL pointer for result\n",
++
++				mmc_hostname(card->host), p_req->type);
++
++		return -EINVAL;
++
++	}
++
++
++
++	if (p_req->type == RPMB_GET_WRITE_COUNTER) {
++
++		if (!p_req->nonce || !p_req->wc) {
++
++			pr_err("%s: Type %d has NULL pointer for nonce/wc\n",
++
++					mmc_hostname(card->host), p_req->type);
++
++			return -EINVAL;
++
++		}
++
++		/*
++
++		 * used to allocate frame
++
++		 */
++
++		p_req->blk_cnt = 1;
++
++	} else if (p_req->type == RPMB_WRITE_DATA ||
++
++			p_req->type == RPMB_READ_DATA) {
++
++		if ((__u32)(p_req->addr + p_req->blk_cnt) >
++
++				card->ext_csd.rpmb_size) {
++
++			pr_err("%s Type %d: beyond the RPMB partition rang addr %d, blk_cnt %d, rpmb_size %d\n",
++
++					mmc_hostname(card->host),
++
++					p_req->type,
++
++					p_req->addr,
++
++					p_req->blk_cnt,
++
++					card->ext_csd.rpmb_size);
++
++			/*
++
++			 * Not return error here since we want device to handle
++
++			 * such errors
++
++			 */
++
++		}
++
++		if (p_req->blk_cnt == 0) {
++
++			pr_err("%s: Type %d has zero block count\n",
++
++					mmc_hostname(card->host),
++
++					p_req->blk_cnt);
++
++			return -EINVAL;
++
++		} else if (p_req->blk_cnt > card->rpmb_max_req) {
++
++			pr_err("%s: Type %d has invalid block count, cannot large than %d\n",
++
++					mmc_hostname(card->host),
++
++					p_req->blk_cnt,
++
++					card->rpmb_max_req);
++
++			return -EINVAL;
++
++		}
++
++		if (!p_req->data) {
++
++			pr_err("%s: Type %d has NULL pointer for data\n",
++
++					mmc_hostname(card->host), p_req->type);
++
++			return -EINVAL;
++
++		}
++
++		if (p_req->type == RPMB_WRITE_DATA) {
++
++			if (!p_req->wc || !p_req->mac) {
++
++				pr_err("%s: Type %d has NULL pointer for write counter/MAC\n",
++
++						mmc_hostname(card->host),
++
++						p_req->type);
++
++				return -EINVAL;
++
++		}
++
++		} else {
++
++			if (!p_req->nonce) {
++
++				pr_err("%s: Type %d has NULL pointer for nonce\n",
++
++						mmc_hostname(card->host),
++
++						p_req->type);
++
++				return -EINVAL;
++
++			}
++
++		}
++
++	} else
++
++		return -EOPNOTSUPP;
++
++
++
++	return 0;
++
++}
++
++
++
++/*
++
++ * prepare the request of RPMB frame
++
++ * RPMB frame is MSB first
++
++ * convert needed bytes
++
++ * return how many frames will be prepared
++
++ */
++
++int mmc_rpmb_pre_frame(struct mmc_core_rpmb_req *rpmb_req,
++
++		struct mmc_card *card)
++
++{
++
++	int i, ret;
++
++	struct mmc_ioc_rpmb_req *p_req;
++
++	__u8 *buf_frame;
++
++	__u16 blk_cnt, addr, type;
++
++	__u32 w_counter;
++
++
++
++	if (!rpmb_req || !card)
++
++		return -EINVAL;
++
++
++
++	p_req = rpmb_req->req;
++
++	if (!p_req) {
++
++		pr_err("%s: mmc_ioc_rpmb_req is NULL. Wrong parameter\n",
++
++				mmc_hostname(card->host));
++
++		return -EINVAL;
++
++	}
++
++
++
++	/*
++
++	 * make sure these two items are clear
++
++	 */
++
++	rpmb_req->ready = 0;
++
++	rpmb_req->frame = NULL;
++
++
++
++	ret = mmc_rpmb_request_check(card, p_req);
++
++	if (ret)
++
++		return ret;
++
++
++
++	buf_frame = kzalloc(512 * p_req->blk_cnt, GFP_KERNEL);
++
++	if (!buf_frame) {
++
++		pr_err("%s: cannot allocate frame for type %d\n",
++
++				mmc_hostname(card->host), p_req->type);
++
++		return -ENOMEM;
++
++	}
++
++
++
++	type = cpu_to_be16p(&p_req->type);
++
++	if (p_req->type == RPMB_GET_WRITE_COUNTER ||
++
++			p_req->type == RPMB_READ_DATA) {
++
++		/*
++
++		 * One package prepared
++
++		 * This request needs Nonce and type
++
++		 * If is data read, then also need addr
++
++		 */
++
++		memcpy(buf_frame + RPMB_TYPE_BEG, &type, 2);
++
++		if (p_req->type == RPMB_READ_DATA) {
++
++			addr = cpu_to_be16p(&p_req->addr);
++
++			memcpy(buf_frame + RPMB_ADDR_BEG, &addr, 2);
++
++		}
++
++		/* convert Nonce code */
++
++		memcpy(buf_frame + RPMB_NONCE_BEG, p_req->nonce, 16);
++
++	} else if (p_req->type == RPMB_WRITE_DATA) {
++
++		__u8 *data = p_req->data;
++
++		/*
++
++		 * multiple package prepared
++
++		 * This request nees blk_cnt, addr, write_counter,
++
++		 * data and mac
++
++		 */
++
++		blk_cnt = cpu_to_be16p(&p_req->blk_cnt);
++
++		addr = cpu_to_be16p(&p_req->addr);
++
++		w_counter = cpu_to_be32p(p_req->wc);
++
++		for (i = 0; i < p_req->blk_cnt; i++) {
++
++			memcpy(buf_frame + i * 512 + RPMB_TYPE_BEG,
++
++					&type, 2);
++
++			memcpy(buf_frame + i * 512 + RPMB_BLKS_BEG,
++
++					&blk_cnt, 2);
++
++			memcpy(buf_frame + i * 512 + RPMB_ADDR_BEG,
++
++					&addr, 2);
++
++			memcpy(buf_frame + i * 512 + RPMB_WCOUNTER_BEG,
++
++					&w_counter, 4);
++
++			memcpy(buf_frame + i * 512 + RPMB_DATA_BEG,
++
++					data, 256);
++
++			data += 256;
++
++		}
++
++		/* convert MAC code */
++
++		memcpy(buf_frame + 512 * (i - 1) + RPMB_MAC_BEG,
++
++				p_req->mac, 32);
++
++	} else {
++
++		pr_err("%s: We shouldn't be here\n", mmc_hostname(card->host));
++
++		kfree(buf_frame);
++
++		return -EINVAL;
++
++	}
++
++	rpmb_req->ready = 1;
++
++	rpmb_req->frame = buf_frame;
++
++	return 0;
++
++}
++
++EXPORT_SYMBOL_GPL(mmc_rpmb_pre_frame);
++
++
++
++int mmc_rpmb_partition_ops(struct mmc_core_rpmb_req *rpmb_req,
++
++		struct mmc_card *card)
++
++{
++
++	int err = 0;
++
++	struct mmc_ioc_rpmb_req *p_req;
++
++	__u16 type, blks;
++
++	__u8 *buf_frame;
++
++
++
++	if (!rpmb_req || !card)
++
++		return -EINVAL;
++
++
++
++	p_req = rpmb_req->req;
++
++	buf_frame = rpmb_req->frame;
++
++
++
++	if (!p_req || !rpmb_req->ready || !buf_frame) {
++
++		pr_err("%s: mmc_ioc_rpmb_req is not prepared\n",
++
++				mmc_hostname(card->host));
++
++		return -EINVAL;
++
++	}
++
++
++
++	type = p_req->type;
++
++	blks = p_req->blk_cnt;
++
++
++
++	/*
++
++ * STEP 1: send request to RPMB partition
++
++	 */
++
++	if (type == RPMB_WRITE_DATA)
++
++		err = mmc_rpmb_send_command(card, buf_frame, blks,
++
++				type, RPMB_REQ);
++
++	else
++
++		err = mmc_rpmb_send_command(card, buf_frame, 1, type, RPMB_REQ);
++
++
++
++	if (err) {
++
++		pr_err("%s: request write counter failed (%d)\n",
++
++				mmc_hostname(card->host), err);
++
++		goto out;
++
++	}
++
++
++
++	memset(buf_frame, 0, 512 * blks);
++
++	/*
++
++	 * STEP 2: check write result
++
++	 * Only for WRITE_DATA or Program key
++
++	 */
++
++	if (type == RPMB_WRITE_DATA) {
++
++		buf_frame[RPMB_TYPE_BEG + 1] = RPMB_RESULT_READ;
++
++		err = mmc_rpmb_send_command(card, buf_frame, 1,
++
++				RPMB_RESULT_READ, RPMB_REQ);
++
++		if (err) {
++
++			pr_err("%s: request write counter failed (%d)\n",
++
++					mmc_hostname(card->host), err);
++
++			goto out;
++
++		}
++
++	}
++
++
++
++	/*
++
++	 * STEP 3: get response from RPMB partition
++
++	 */
++
++
++
++	if (type == RPMB_READ_DATA)
++
++		err = mmc_rpmb_send_command(card, buf_frame,
++
++				blks, type, RPMB_RESP);
++
++	else
++
++		err = mmc_rpmb_send_command(card, buf_frame,
++
++				1, type, RPMB_RESP);
++
++	if (err) {
++
++		pr_err("%s: response write counter failed (%d)\n",
++
++				mmc_hostname(card->host), err);
++
++	}
++
++out:
++
++	return err;
++
++}
++
++EXPORT_SYMBOL_GPL(mmc_rpmb_partition_ops);
+diff --git a/drivers/mtd/spi-nor/spi-nor.c b/drivers/mtd/spi-nor/spi-nor.c
+index 909a738..eb12295 100644
+--- a/drivers/mtd/spi-nor/spi-nor.c
++++ b/drivers/mtd/spi-nor/spi-nor.c
+@@ -453,7 +453,7 @@ const struct spi_device_id spi_nor_ids[] = {
+ 	{ "f25l32pa", INFO(0x8c2016, 0, 64 * 1024, 64, SECT_4K) },
+ 
+ 	/* Everspin */
+-	{ "mr25h256", CAT25_INFO(32 * 1024, 1, 256, 2, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) },
++//	{ "mr25h256", CAT25_INFO(32 * 1024, 1, 256, 2, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) },
+ 	{ "mr25h10",  CAT25_INFO(128 * 1024, 1, 256, 3, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) },
+ 
+ 	/* GigaDevice */
+@@ -537,6 +537,7 @@ const struct spi_device_id spi_nor_ids[] = {
+ 	{ "m25p128", INFO(0x202018,  0, 256 * 1024,  64, 0) },
+ 	{ "n25q032", INFO(0x20ba16,  0,  64 * 1024,  64, 0) },
+ 
++	/* Chris Marked
+ 	{ "m25p05-nonjedec",  INFO(0, 0,  32 * 1024,   2, 0) },
+ 	{ "m25p10-nonjedec",  INFO(0, 0,  32 * 1024,   4, 0) },
+ 	{ "m25p20-nonjedec",  INFO(0, 0,  64 * 1024,   4, 0) },
+@@ -546,6 +547,7 @@ const struct spi_device_id spi_nor_ids[] = {
+ 	{ "m25p32-nonjedec",  INFO(0, 0,  64 * 1024,  64, 0) },
+ 	{ "m25p64-nonjedec",  INFO(0, 0,  64 * 1024, 128, 0) },
+ 	{ "m25p128-nonjedec", INFO(0, 0, 256 * 1024,  64, 0) },
++*/
+ 
+ 	{ "m45pe10", INFO(0x204011,  0, 64 * 1024,    2, 0) },
+ 	{ "m45pe80", INFO(0x204014,  0, 64 * 1024,   16, 0) },
+@@ -579,11 +581,11 @@ const struct spi_device_id spi_nor_ids[] = {
+ 	{ "w25q256", INFO(0xef4019, 0, 64 * 1024, 512, SECT_4K) },
+ 
+ 	/* Catalyst / On Semiconductor -- non-JEDEC */
+-	{ "cat25c11", CAT25_INFO(16, 8, 16, 1, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) },
++/*	{ "cat25c11", CAT25_INFO(16, 8, 16, 1, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) },
+ 	{ "cat25c03", CAT25_INFO(32, 8, 16, 2, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) },
+ 	{ "cat25c09", CAT25_INFO(128, 8, 32, 2, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) },
+ 	{ "cat25c17", CAT25_INFO(256, 8, 32, 2, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) },
+-	{ "cat25128", CAT25_INFO(2048, 8, 64, 2, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) },
++	{ "cat25128", CAT25_INFO(2048, 8, 64, 2, SPI_NOR_NO_ERASE | SPI_NOR_NO_FR) }, Chris Marked*/
+ 	{ },
+ };
+ 
+diff --git a/drivers/net/ethernet/freescale/fec_main.c b/drivers/net/ethernet/freescale/fec_main.c
+index f949825..77c3184 100644
+--- a/drivers/net/ethernet/freescale/fec_main.c
++++ b/drivers/net/ethernet/freescale/fec_main.c
+@@ -1677,6 +1677,20 @@ static void fec_get_mac(struct net_device *ndev)
+ 			if (mac)
+ 				iap = (unsigned char *) mac;
+ 		}
++	} else {
++		struct device_node *enet_np;
++		enet_np = of_find_compatible_node(NULL, NULL, "fsl,imx6q-fec");
++		if(enet_np) {
++			struct property *of_mac;
++			//of_mac = kzalloc(sizeof(*of_mac) + 6, GFP_KERNEL);
++			of_mac = kzalloc(sizeof(*of_mac), GFP_KERNEL);
++			of_mac->length = 6;
++			of_mac->name = kstrdup("local-mac-address", GFP_KERNEL);
++			//of_mac->value = of_mac + 1;
++			of_mac->value = macaddr;
++			of_update_property(enet_np, of_mac);
++			of_node_put(enet_np);
++		}
+ 	}
+ 
+ 	/*
+diff --git a/drivers/thermal/imx_thermal.c b/drivers/thermal/imx_thermal.c
+index cb87fa6..5716471 100644
+--- a/drivers/thermal/imx_thermal.c
++++ b/drivers/thermal/imx_thermal.c
+@@ -55,14 +55,14 @@ enum imx_thermal_trip {
+  * It defines the temperature in millicelsius for passive trip point
+  * that will trigger cooling action when crossed.
+  */
+-#define IMX_TEMP_PASSIVE		85000
++#define IMX_TEMP_PASSIVE		100000
+ #define IMX_TEMP_PASSIVE_COOL_DELTA	10000
+ 
+ /*
+  * The maximum die temperature on imx parts is 105C, let's give some cushion
+  * for noise and possible temperature rise between measurements.
+  */
+-#define IMX_TEMP_CRITICAL		100000
++#define IMX_TEMP_CRITICAL		105000
+ 
+ #define IMX_POLLING_DELAY		2000 /* millisecond */
+ #define IMX_PASSIVE_DELAY		1000
+diff --git a/drivers/usb/serial/option.c b/drivers/usb/serial/option.c
+index 9da566a..dd998d2 100644
+--- a/drivers/usb/serial/option.c
++++ b/drivers/usb/serial/option.c
+@@ -1073,6 +1073,8 @@ static const struct usb_device_id option_ids[] = {
+ 	{ USB_DEVICE(QUALCOMM_VENDOR_ID, 0x6613)}, /* Onda H600/ZTE MF330 */
+ 	{ USB_DEVICE(QUALCOMM_VENDOR_ID, 0x0023)}, /* ONYX 3G device */
+ 	{ USB_DEVICE(QUALCOMM_VENDOR_ID, 0x9000)}, /* SIMCom SIM5218 */
++	{ USB_DEVICE(QUALCOMM_VENDOR_ID, 0x9003) },/* Quectel UC20 */ /* Add to support USB 3G module - Quectel UC20, by VIA Embedded, 2015.08.18 */
++	{ USB_DEVICE(0x1546, 0x1102) },/* U-Blox_LISA-U200 */ /* Add to support USB 3G module, by VIA embedded, 2015.08.18 */
+ 	{ USB_DEVICE(CMOTECH_VENDOR_ID, CMOTECH_PRODUCT_6001) },
+ 	{ USB_DEVICE(CMOTECH_VENDOR_ID, CMOTECH_PRODUCT_CMU_300) },
+ 	{ USB_DEVICE(CMOTECH_VENDOR_ID, CMOTECH_PRODUCT_6003),
+diff --git a/drivers/video/mxc/ldb.c b/drivers/video/mxc/ldb.c
+index 0fa426d..0f51c5e 100644
+--- a/drivers/video/mxc/ldb.c
++++ b/drivers/video/mxc/ldb.c
+@@ -31,7 +31,10 @@
+ #include <linux/types.h>
+ #include <video/of_videomode.h>
+ #include <video/videomode.h>
++#include <video/of_display_timing.h>
+ #include "mxc_dispdrv.h"
++#include <linux/gpio.h>
++#include <linux/delay.h>
+ 
+ #define DRIVER_NAME	"ldb"
+ 
+@@ -57,6 +60,11 @@
+ 
+ #define INVALID_BUS_REG			(~0UL)
+ 
++
++#define IMX_GPIO_NR(bank, nr)		(((bank) - 1) * 32 + (nr))
++#define MX6Q_SABRELITE_GPIO6_15		IMX_GPIO_NR(6, 15)
++static __iomem *lvdsen_reg_base1 = 0;
++
+ struct crtc_mux {
+ 	enum crtc crtc;
+ 	u32 val;
+@@ -85,6 +93,7 @@ struct ldb_chan {
+ 	struct ldb_data *ldb;
+ 	struct fb_info *fbi;
+ 	struct videomode vm;
++	struct display_timings *disp_timings;
+ 	enum crtc crtc;
+ 	int chno;
+ 	bool is_used;
+@@ -294,7 +303,8 @@ static int ldb_init(struct mxc_dispdrv_handle *mddh,
+ 	struct ldb_chan *chan;
+ 	struct fb_videomode fb_vm;
+ 	int chno;
+-
++	unsigned int index = 0;
++	int reg_val = 0;
+ 	chno = ldb->chan[ldb->primary_chno].is_used ?
+ 		!ldb->primary_chno : ldb->primary_chno;
+ 
+@@ -312,6 +322,24 @@ static int ldb_init(struct mxc_dispdrv_handle *mddh,
+ 	chan->is_used = true;
+ 
+ 	chan->fbi = fbi;
++	
++	/* determine disp_timing according to dft_mode_str*/
++	if(!strncmp("480C60", setting->dft_mode_str, 6 )) {
++		index = 0; /* 480C60 mode*/
++	} else if(!strncmp("LDB-XGA", setting->dft_mode_str, 7 )) {
++		index = 1; /* LDB-XGA */
++	} else if(!strncmp("LDB-WSXGA+", setting->dft_mode_str, 10 )) {
++		index = 2; /* LDB-WSXGA+*/
++		ldb->spl_mode = true;// split mode 
++		ldb->ctrl |= LDB_SPLIT_MODE_EN;
++		ldb->ctrl |= LDB_DATA_WIDTH_CH0_24;
++		ldb->ctrl |= LDB_DATA_WIDTH_CH1_24;
++		dev_info(dev, "split mode\n");
++	} else {
++		dev_info(dev, "No valid video mode found!\n");
++	}
++	videomode_from_timings(chan->disp_timings, &chan->vm, index);	
++	display_timings_release(chan->disp_timings);
+ 
+ 	fb_videomode_from_videomode(&chan->vm, &fb_vm);
+ 
+@@ -320,6 +348,22 @@ static int ldb_init(struct mxc_dispdrv_handle *mddh,
+ 	fb_videomode_to_var(&fbi->var, &fb_vm);
+ 
+ 	setting->crtc = chan->crtc;
++	/* backlight enable */
++	reg_val = readl(lvdsen_reg_base1);
++	reg_val &= 0xfffffff8;
++	reg_val |= 0x5; // [2:0] = 101; 
++	writel(reg_val, lvdsen_reg_base1);
++
++	/*Set GPIO6[15] to high*/
++        gpio_request(MX6Q_SABRELITE_GPIO6_15, "gpio6_15");
++        gpio_direction_output(MX6Q_SABRELITE_GPIO6_15, 1);
++        msleep(100);
++
++         /* Sometimes, the LVDS panel can not be lighted after reboot, but can be actived in user space
++            by operating the sysfs node, so we did the same action as user space did. */
++        gpio_set_value(MX6Q_SABRELITE_GPIO6_15, 1);
++  	/*Do not free gpio here, free it in ldb_remove
++ 	gpio_free(MX6Q_SABRELITE_GPIO6_15);*/
+ 
+ 	return 0;
+ }
+@@ -486,6 +530,7 @@ static int ldb_enable(struct mxc_dispdrv_handle *mddh,
+ 	struct device *dev = ldb->dev;
+ 	struct bus_mux bus_mux;
+ 	int ret = 0, id = 0, chno, other_chno;
++	int reg_val = 0;
+ 
+ 	ret = find_ldb_chno(ldb, fbi, &chno);
+ 	if (ret < 0)
+@@ -523,6 +568,7 @@ static int ldb_enable(struct mxc_dispdrv_handle *mddh,
+ 	}
+ 
+ 	regmap_write(ldb->regmap, ldb->ctrl_reg, ldb->ctrl);
++
+ 	return 0;
+ }
+ 
+@@ -546,6 +592,7 @@ static void ldb_disable(struct mxc_dispdrv_handle *mddh,
+ 	}
+ 
+ 	regmap_write(ldb->regmap, ldb->ctrl_reg, ldb->ctrl);
++
+ 	return;
+ }
+ 
+@@ -675,7 +722,6 @@ static int ldb_probe(struct platform_device *pdev)
+ 	bool ext_ref;
+ 	int i, data_width, mapping, child_count = 0;
+ 	char clkname[16];
+-
+ 	ldb = devm_kzalloc(dev, sizeof(*ldb), GFP_KERNEL);
+ 	if (!ldb)
+ 		return -ENOMEM;
+@@ -811,8 +857,11 @@ static int ldb_probe(struct platform_device *pdev)
+ 			return -EINVAL;
+ 		}
+ 
+-		ret = of_get_videomode(child, &chan->vm, 0);
+-		if (ret)
++		//ret = of_get_videomode(child, &chan->vm, 0);
++		/*get all the timings here and select user preferred mode in ldb_init*/
++		chan->disp_timings = NULL;
++		chan->disp_timings = of_get_display_timings(child);
++		if (!chan->disp_timings)
+ 			return -EINVAL;
+ 
+ 		sprintf(clkname, "ldb_di%d", i);
+@@ -858,6 +907,13 @@ static int ldb_probe(struct platform_device *pdev)
+ 	mxc_dispdrv_setdata(ldb->mddh, ldb);
+ 	dev_set_drvdata(&pdev->dev, ldb);
+ 
++	//Remap for setting NANDF_CS32 to work as GPIO6[15]
++	lvdsen_reg_base1 = ioremap(0x020e02ec, 4);
++	if (lvdsen_reg_base1 == NULL) {
++		dev_err(dev, "ioremap for lvds_en failed.\n");
++		return -EINVAL;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -867,6 +923,8 @@ static int ldb_remove(struct platform_device *pdev)
+ 
+ 	mxc_dispdrv_puthandle(ldb->mddh);
+ 	mxc_dispdrv_unregister(ldb->mddh);
++	/*free gpio which control backlight*/
++        gpio_free(MX6Q_SABRELITE_GPIO6_15);
+ 	return 0;
+ }
+ 
+diff --git a/include/linux/mmc/card.h b/include/linux/mmc/card.h
+index ca93776..a9cefcd 100644
+--- a/include/linux/mmc/card.h
++++ b/include/linux/mmc/card.h
+@@ -83,6 +83,7 @@ struct mmc_ext_csd {
+ 	unsigned int		hpi_cmd;		/* cmd used as HPI */
+ 	bool			bkops;		/* background support bit */
+ 	bool			bkops_en;	/* background enable bit */
++	unsigned int		rpmb_size;	/* Units: half sector */
+ 	unsigned int            data_sector_size;       /* 512 bytes or 4KB */
+ 	unsigned int            data_tag_unit_size;     /* DATA TAG UNIT size */
+ 	unsigned int		boot_ro_lock;		/* ro lock support */
+@@ -297,6 +298,7 @@ struct mmc_card {
+ 	struct dentry		*debugfs_root;
+ 	struct mmc_part	part[MMC_NUM_PHY_PARTITION]; /* physical partitions */
+ 	unsigned int    nr_parts;
++	unsigned int	rpmb_max_req;
+ };
+ 
+ /*
+@@ -522,5 +524,6 @@ extern void mmc_unregister_driver(struct mmc_driver *);
+ 
+ extern void mmc_fixup_device(struct mmc_card *card,
+ 			     const struct mmc_fixup *table);
++extern int mmc_rpmb_req_handle(struct device *emmc, struct mmc_ioc_rpmb_req *req);
+ 
+ #endif /* LINUX_MMC_CARD_H */
+diff --git a/include/linux/mmc/core.h b/include/linux/mmc/core.h
+index c3d6e70..a9d1767 100644
+--- a/include/linux/mmc/core.h
++++ b/include/linux/mmc/core.h
+@@ -10,6 +10,9 @@
+ 
+ #include <linux/interrupt.h>
+ #include <linux/completion.h>
++#include <linux/device.h>
++#include <linux/mmc/ioctl.h>
++
+ 
+ struct request;
+ struct mmc_data;
+@@ -135,6 +138,35 @@ struct mmc_request {
+ 	struct mmc_host		*host;
+ };
+ 
++/*
++ * RPMB frame structure for MMC core stack
++ */
++
++struct mmc_core_rpmb_req {
++	struct mmc_ioc_rpmb_req *req;
++	__u8 *frame;
++	bool ready;
++};
++
++#define RPMB_PROGRAM_KEY	1	/* Program RPMB Authentication Key */
++#define RPMB_GET_WRITE_COUNTER	2	/* Read RPMB write counter */
++#define RPMB_WRITE_DATA		3	/* Write data to RPMB partition */
++#define RPMB_READ_DATA		4	/* Read data from RPMB partition */
++#define RPMB_RESULT_READ	5	/* Read result request */
++#define RPMB_REQ		1	/* RPMB request mark */
++#define RPMB_RESP		(1 << 1)/* RPMB response mark */
++#define RPMB_AVALIABLE_SECTORS	8	/* 4K page size */
++
++#define RPMB_TYPE_BEG		510
++#define RPMB_RES_BEG		508
++#define RPMB_BLKS_BEG		506
++#define RPMB_ADDR_BEG		504
++#define RPMB_WCOUNTER_BEG	500
++
++#define RPMB_NONCE_BEG		484
++#define RPMB_DATA_BEG		228
++#define RPMB_MAC_BEG		196
++
+ struct mmc_card;
+ struct mmc_async_req;
+ 
+@@ -153,6 +185,10 @@ extern int __mmc_switch(struct mmc_card *, u8, u8, u8, unsigned int, bool);
+ extern int mmc_switch(struct mmc_card *, u8, u8, u8, unsigned int);
+ extern int mmc_send_ext_csd(struct mmc_card *card, u8 *ext_csd);
+ 
++extern int mmc_rpmb_partition_ops(struct mmc_core_rpmb_req *, struct mmc_card *);
++extern int mmc_rpmb_pre_frame(struct mmc_core_rpmb_req *, struct mmc_card *);
++extern void mmc_rpmb_post_frame(struct mmc_core_rpmb_req *);
++
+ #define MMC_ERASE_ARG		0x00000000
+ #define MMC_SECURE_ERASE_ARG	0x80000000
+ #define MMC_TRIM_ARG		0x00000001
+diff --git a/include/uapi/linux/mmc/ioctl.h b/include/uapi/linux/mmc/ioctl.h
+index 1f5e689..21eaac9 100644
+--- a/include/uapi/linux/mmc/ioctl.h
++++ b/include/uapi/linux/mmc/ioctl.h
+@@ -47,6 +47,18 @@ struct mmc_ioc_cmd {
+ 
+ #define MMC_IOC_CMD _IOWR(MMC_BLOCK_MAJOR, 0, struct mmc_ioc_cmd)
+ 
++struct mmc_ioc_rpmb_req {
++	__u16 type;		/* RPMB request type */
++	__u16 *result;		/* response or request result */
++	__u16 blk_cnt;		/* Number of blocks (half sector 256B) */
++	__u16 addr;		/* data address */
++	__u32 *wc;		/* write counter */
++	__u8 *nonce;		/* Ramdom number */
++	__u8 *data;		/* Buffer of the user data */
++	__u8 *mac;		/* Message Authentication Code */
++};
++
++#define MMC_IOC_RPMB_REQ _IOWR(MMC_BLOCK_MAJOR, 1, struct mmc_ioc_rpmb_req)
+ /*
+  * Since this ioctl is only meant to enhance (and not replace) normal access
+  * to the mmc bus device, an upper data transfer limit of MMC_IOC_MAX_BYTES
+diff --git a/sound/soc/codecs/sgtl5000.c b/sound/soc/codecs/sgtl5000.c
+index ddf66d9..d571544 100644
+--- a/sound/soc/codecs/sgtl5000.c
++++ b/sound/soc/codecs/sgtl5000.c
+@@ -60,6 +60,32 @@ static const u16 sgtl5000_regs[SGTL5000_MAX_REG_OFFSET] =  {
+ 	[SGTL5000_DAP_AVC_DECAY] = 0x0050,
+ };
+ 
++u16 init_regs[] = {
++	SGTL5000_CHIP_CLK_CTRL,		0x0008,
++	SGTL5000_CHIP_I2S_CTRL,		0x0010,
++	SGTL5000_CHIP_SSS_CTRL,		0x0010,
++	SGTL5000_CHIP_DAC_VOL,		0x3c3c,
++	SGTL5000_CHIP_PAD_STRENGTH,	0x015f,
++	SGTL5000_CHIP_ANA_HP_CTRL,	0x1818,
++	SGTL5000_CHIP_ANA_CTRL,		0x0111,
++	SGTL5000_CHIP_LINE_OUT_VOL,	0x0404,
++	SGTL5000_CHIP_ANA_POWER,	0x7060,
++	SGTL5000_CHIP_PLL_CTRL,		0x5000,
++	SGTL5000_DAP_BASS_ENHANCE,	0x0040,
++	SGTL5000_DAP_BASS_ENHANCE_CTRL,	0x051f,
++	SGTL5000_DAP_SURROUND,		0x0040,
++	SGTL5000_DAP_EQ_BASS_BAND0,	0x002f,
++	SGTL5000_DAP_EQ_BASS_BAND1,	0x002f,
++	SGTL5000_DAP_EQ_BASS_BAND2,	0x002f,
++	SGTL5000_DAP_EQ_BASS_BAND3,	0x002f,
++	SGTL5000_DAP_EQ_BASS_BAND4,	0x002f,
++	SGTL5000_DAP_MAIN_CHAN,		0x8000,
++	SGTL5000_DAP_AVC_CTRL,		0x0510,
++	SGTL5000_DAP_AVC_THRESHOLD,	0x1473,
++	SGTL5000_DAP_AVC_ATTACK,	0x0028,
++	SGTL5000_DAP_AVC_DECAY,		0x0050,
++};
++
+ /* regulator supplies for sgtl5000, VDDD is an optional external supply */
+ enum sgtl5000_regulator_supplies {
+ 	VDDA,
+@@ -112,6 +138,8 @@ struct sgtl5000_priv {
+ 	int fmt;	/* i2s data format */
+ 	struct regulator_bulk_data supplies[SGTL5000_SUPPLY_NUM];
+ 	struct ldo_regulator *ldo;
++	struct clk *mclk;
++	int revision;
+ };
+ 
+ /*
+@@ -151,12 +179,12 @@ static int power_vag_event(struct snd_soc_dapm_widget *w,
+ 	struct snd_kcontrol *kcontrol, int event)
+ {
+ 	switch (event) {
+-	case SND_SOC_DAPM_POST_PMU:
++	case SND_SOC_DAPM_PRE_PMU:
+ 		snd_soc_update_bits(w->codec, SGTL5000_CHIP_ANA_POWER,
+ 			SGTL5000_VAG_POWERUP, SGTL5000_VAG_POWERUP);
+ 		break;
+ 
+-	case SND_SOC_DAPM_PRE_PMD:
++	case SND_SOC_DAPM_POST_PMD:
+ 		snd_soc_update_bits(w->codec, SGTL5000_CHIP_ANA_POWER,
+ 			SGTL5000_VAG_POWERUP, 0);
+ 		msleep(400);
+@@ -217,11 +245,12 @@ static const struct snd_soc_dapm_widget sgtl5000_dapm_widgets[] = {
+ 				0, SGTL5000_CHIP_DIG_POWER,
+ 				1, 0),
+ 
++	SND_SOC_DAPM_SUPPLY("VAG_POWER", SGTL5000_CHIP_ANA_POWER, 7, 0,
++			    power_vag_event,
++			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
++
+ 	SND_SOC_DAPM_ADC("ADC", "Capture", SGTL5000_CHIP_ANA_POWER, 1, 0),
+ 	SND_SOC_DAPM_DAC("DAC", "Playback", SGTL5000_CHIP_ANA_POWER, 3, 0),
+-
+-	SND_SOC_DAPM_PRE("VAG_POWER_PRE", power_vag_event),
+-	SND_SOC_DAPM_POST("VAG_POWER_POST", power_vag_event),
+ };
+ 
+ /* routes for sgtl5000 */
+@@ -229,13 +258,16 @@ static const struct snd_soc_dapm_route sgtl5000_dapm_routes[] = {
+ 	{"Capture Mux", "LINE_IN", "LINE_IN"},	/* line_in --> adc_mux */
+ 	{"Capture Mux", "MIC_IN", "MIC_IN"},	/* mic_in --> adc_mux */
+ 
++	{"ADC", NULL, "VAG_POWER"},
+ 	{"ADC", NULL, "Capture Mux"},		/* adc_mux --> adc */
+ 	{"AIFOUT", NULL, "ADC"},		/* adc --> i2s_out */
+ 
++	{"DAC", NULL, "VAG_POWER"},
+ 	{"DAC", NULL, "AIFIN"},			/* i2s-->dac,skip audio mux */
+ 	{"Headphone Mux", "DAC", "DAC"},	/* dac --> hp_mux */
+ 	{"LO", NULL, "DAC"},			/* dac --> line_out */
+ 
++	{"LINE_IN", NULL, "VAG_POWER"},
+ 	{"Headphone Mux", "LINE_IN", "LINE_IN"},/* line_in --> hp_mux */
+ 	{"HP", NULL, "Headphone Mux"},		/* hp_mux --> hp */
+ 
+@@ -1210,9 +1242,7 @@ static int sgtl5000_replace_vddd_with_ldo(struct snd_soc_codec *codec)
+ 
+ static int sgtl5000_enable_regulators(struct snd_soc_codec *codec)
+ {
+-	u16 reg;
+ 	int ret;
+-	int rev;
+ 	int i;
+ 	int external_vddd = 0;
+ 	struct sgtl5000_priv *sgtl5000 = snd_soc_codec_get_drvdata(codec);
+@@ -1238,24 +1268,11 @@ static int sgtl5000_enable_regulators(struct snd_soc_codec *codec)
+ 	/* wait for all power rails bring up */
+ 	udelay(10);
+ 
+-	/* read chip information */
+-	reg = snd_soc_read(codec, SGTL5000_CHIP_ID);
+-	if (((reg & SGTL5000_PARTID_MASK) >> SGTL5000_PARTID_SHIFT) !=
+-	    SGTL5000_PARTID_PART_ID) {
+-		dev_err(codec->dev,
+-			"Device with ID register %x is not a sgtl5000\n", reg);
+-		ret = -ENODEV;
+-		goto err_regulator_disable;
+-	}
+-
+-	rev = (reg & SGTL5000_REVID_MASK) >> SGTL5000_REVID_SHIFT;
+-	dev_info(codec->dev, "sgtl5000 revision 0x%x\n", rev);
+-
+ 	/*
+ 	 * workaround for revision 0x11 and later,
+ 	 * roll back to use internal LDO
+ 	 */
+-	if (external_vddd && rev >= 0x11) {
++	if (external_vddd && sgtl5000->revision >= 0x11) {
+ 		/* disable all regulator first */
+ 		regulator_bulk_disable(ARRAY_SIZE(sgtl5000->supplies),
+ 					sgtl5000->supplies);
+@@ -1278,9 +1295,6 @@ static int sgtl5000_enable_regulators(struct snd_soc_codec *codec)
+ 
+ 	return 0;
+ 
+-err_regulator_disable:
+-	regulator_bulk_disable(ARRAY_SIZE(sgtl5000->supplies),
+-				sgtl5000->supplies);
+ err_regulator_free:
+ 	regulator_bulk_free(ARRAY_SIZE(sgtl5000->supplies),
+ 				sgtl5000->supplies);
+@@ -1313,8 +1327,7 @@ static int sgtl5000_probe(struct snd_soc_codec *codec)
+ 
+ 	/* enable small pop, introduce 400ms delay in turning off */
+ 	snd_soc_update_bits(codec, SGTL5000_CHIP_REF_CTRL,
+-				SGTL5000_SMALL_POP,
+-				SGTL5000_SMALL_POP);
++				SGTL5000_SMALL_POP, 1);
+ 
+ 	/* disable short cut detector */
+ 	snd_soc_write(codec, SGTL5000_CHIP_SHORT_CTRL, 0);
+@@ -1400,27 +1413,127 @@ static struct snd_soc_codec_driver sgtl5000_driver = {
+ 	.num_dapm_routes = ARRAY_SIZE(sgtl5000_dapm_routes),
+ };
+ 
++static s32 sgtl5000_read16(struct i2c_client *client, u16 reg, u16 *val)
++{
++	int retry = 0;
++	int ret;
++	u8 buf[4];
++	struct i2c_msg msgs[2];
++
++	while (retry++ < 3) {
++		buf[0] = reg >> 8;
++		buf[1] = reg & 0xff;
++		msgs[0].addr = client->addr;
++		msgs[0].flags = 0;
++		msgs[0].len = 2;
++		msgs[0].buf = buf;
++		msgs[1].addr = client->addr;
++		msgs[1].flags = I2C_M_RD;
++		msgs[1].len = 2;
++		msgs[1].buf = buf;
++
++		ret = i2c_transfer(client->adapter, msgs, 2);
++		if (ret == 2) {
++			*val = (buf[0] << 8) | buf[1];
++			return 0;
++		}
++		pr_err("%s: ret=%d reg=%x addr=%x\n", __func__, ret, reg, client->addr);
++	}
++	return (ret < 0) ? ret : -EIO;
++}
++
++static s32 sgtl5000_write16(struct i2c_client *client, u16 reg, u16 val)
++{
++	int retry = 0;
++	int ret;
++	u8 buf[4];
++	struct i2c_msg msgs[1];
++
++	while (retry++ < 3) {
++		buf[0] = reg >> 8;
++		buf[1] = reg & 0xff;
++		buf[2] = val >> 8;
++		buf[3] = val & 0xff;
++		msgs[0].addr = client->addr;
++		msgs[0].flags = 0;
++		msgs[0].len = 4;
++		msgs[0].buf = buf;
++
++		ret = i2c_transfer(client->adapter, msgs, 1);
++		if (ret == 1)
++			return 0;
++		pr_err("%s: ret=%d reg=%x addr=%x\n", __func__, ret, reg, client->addr);
++	}
++	return (ret < 0) ? ret : -EIO;
++}
++
+ static int sgtl5000_i2c_probe(struct i2c_client *client,
+ 			      const struct i2c_device_id *id)
+ {
+ 	struct sgtl5000_priv *sgtl5000;
+-	int ret;
++	int ret, rev, i;
++	u16 reg;
+ 
+ 	sgtl5000 = devm_kzalloc(&client->dev, sizeof(struct sgtl5000_priv),
+ 								GFP_KERNEL);
+ 	if (!sgtl5000)
+ 		return -ENOMEM;
+ 
++	sgtl5000->mclk = devm_clk_get(&client->dev, NULL);
++	if (IS_ERR(sgtl5000->mclk)) {
++		ret = PTR_ERR(sgtl5000->mclk);
++		dev_err(&client->dev, "Failed to get mclock: %d\n", ret);
++		/* Defer the probe to see if the clk will be provided later */
++		if (ret == -ENOENT)
++			return -EPROBE_DEFER;
++		return ret;
++	}
++
++	ret = clk_prepare_enable(sgtl5000->mclk);
++	if (ret)
++		return ret;
++
++	/* read chip information */
++	ret = sgtl5000_read16(client, SGTL5000_CHIP_ID, &reg);
++	if (ret < 0) {
++		ret = -ENODEV;
++		goto disable_clk;
++	}
++
++	if (((reg & SGTL5000_PARTID_MASK) >> SGTL5000_PARTID_SHIFT) != SGTL5000_PARTID_PART_ID) {
++		dev_err(&client->dev, "Device with ID register %x is not a sgtl5000\n", reg);
++		ret = -ENODEV;
++		goto disable_clk;
++	}
++
++	rev = (reg & SGTL5000_REVID_MASK) >> SGTL5000_REVID_SHIFT;
++	dev_info(&client->dev, "sgtl5000 revision 0x%x\n", rev);
++	sgtl5000->revision = rev;
++
++	/* Restore regs back to power up conditions */
++	for (i = 0; i < ARRAY_SIZE(init_regs); i +=2)
++		sgtl5000_write16(client, init_regs[i], init_regs[i+1]);
++
++
+ 	i2c_set_clientdata(client, sgtl5000);
+ 
+ 	ret = snd_soc_register_codec(&client->dev,
+ 			&sgtl5000_driver, &sgtl5000_dai, 1);
++	if (ret)
++		goto disable_clk;
++	return ret;
++
++disable_clk:
++	clk_disable_unprepare(sgtl5000->mclk);
+ 	return ret;
+ }
+ 
+ static int sgtl5000_i2c_remove(struct i2c_client *client)
+ {
++	struct sgtl5000_priv *sgtl5000 = i2c_get_clientdata(client);
++
+ 	snd_soc_unregister_codec(&client->dev);
++	clk_disable_unprepare(sgtl5000->mclk);
+ 
+ 	return 0;
+ }

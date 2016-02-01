@@ -1,0 +1,87 @@
+From 038e0174328ed7d5cfeb2ba322d8882ce6b6c8dd Mon Sep 17 00:00:00 2001
+From: FelixWei <FelixWei@viatech.com.cn>
+Date: Fri, 18 Sep 2015 14:43:36 +0800
+Subject: [PATCH 1/2] EminZhang:redrawing colorkey when exit "open file menu"
+ of video-player
+
+---
+ src/misc/v4l_sink/src/mfw_gst_v4lsink.c | 34 +++++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/src/misc/v4l_sink/src/mfw_gst_v4lsink.c b/src/misc/v4l_sink/src/mfw_gst_v4lsink.c
+index dfcccfa..c07821b 100755
+--- a/src/misc/v4l_sink/src/mfw_gst_v4lsink.c
++++ b/src/misc/v4l_sink/src/mfw_gst_v4lsink.c
+@@ -45,8 +45,6 @@
+ 
+ #include "mfw_gst_v4lsink.h"
+ 
+-
+-
+ #if ((defined (_MX6) || defined (_MX37) || defined (_MX51)) && defined (LOC_ALPHA_SUPPORT))
+ #include <linux/mxcfb.h>
+ #endif
+@@ -86,6 +84,8 @@ dprintf (FILE * fp, const char *file, size_t line, int enable,
+                              STATIC VARIABLES
+ =============================================================================*/
+ 
++static gboolean colorkey_flag = FALSE;
++static guint8 colorkey_count = 0;
+ /*=============================================================================
+                              SUSPEND SUPPORT
+ =============================================================================*/
+@@ -477,6 +477,8 @@ static void
+ mfw_gst_v4lsink_set_event_handling (GstXOverlay * overlay,
+     gboolean handle_events)
+ {
++if(handle_events)
++{
+   MFW_GST_V4LSINK_INFO_T *v4l_info = MFW_GST_V4LSINK (overlay);
+   GstXInfo *gstXInfo = v4l_info->gstXInfo;
+ 
+@@ -509,6 +511,9 @@ mfw_gst_v4lsink_set_event_handling (GstXOverlay * overlay,
+   g_mutex_unlock (gstXInfo->x_lock);
+ 
+   g_mutex_unlock (v4l_info->flow_lock);
++}
++if(!handle_events)
++  colorkey_flag=TRUE;
+   return;
+ }
+ 
+@@ -1034,7 +1039,32 @@ mfw_gst_v4lsink_show_frame (GstBaseSink * basesink, GstBuffer * buf)
+   GSList *searchlist;
+ 
+   guint8 i = 0;
++
+   MFWGstV4LSinkBuffer *v4lsink_buffer = NULL;
++  /* When exit "open file menu" of the video player,will redraw colorkey */
++  if(colorkey_flag)
++   {
++    GstXInfo *gstXInfo = v4l_info->gstXInfo;
++    Display * const dpy = gstXInfo->xcontext->disp;
++    const Window xid = gstXInfo->xwindow->win;
++    GC vo_gc;
++
++    colorkey_count++;
++
++    XLockDisplay (dpy);
++    vo_gc = XCreateGC( dpy ,xid, 0, NULL);
++    XSetForeground( dpy, vo_gc, 0x010203);
++    XFillRectangle( dpy, xid, vo_gc,
++                               0, 0,
++                               v4l_info->disp_width, v4l_info->disp_height);
++    XUnlockDisplay (dpy);
++    if (colorkey_count >4 ) {
++        colorkey_flag=FALSE;
++        colorkey_count = 0;
++    }
++
++   }
++
+   /* This is to enable the integration of the peer elements which do not
+      call the gst_pad_alloc_buffer() to allocate their output buffers */
+ 
+-- 
+2.5.2
+

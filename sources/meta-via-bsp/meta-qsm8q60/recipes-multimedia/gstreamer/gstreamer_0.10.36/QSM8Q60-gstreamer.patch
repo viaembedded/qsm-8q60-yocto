@@ -1,0 +1,49 @@
+diff --git a/plugins/elements/gstmultiqueue.c b/plugins/elements/gstmultiqueue.c
+index 0054715..56eff0f 100644
+--- a/plugins/elements/gstmultiqueue.c
++++ b/plugins/elements/gstmultiqueue.c
+@@ -1767,7 +1767,8 @@ single_queue_overrun_cb (GstDataQueue * dq, GstSingleQueue * sq)
+   GList *tmp;
+   GstDataQueueSize size;
+   gboolean filled = FALSE;
+-
++  gboolean all_is_empty = TRUE;
++  gboolean oq_is_empty = TRUE;
+   gst_data_queue_get_level (sq->queue, &size);
+ 
+   GST_LOG_OBJECT (mq, "Single Queue %d is full", sq->id);
+@@ -1781,6 +1782,7 @@ single_queue_overrun_cb (GstDataQueue * dq, GstSingleQueue * sq)
+ 
+     if (gst_data_queue_is_empty (oq->queue)) {
+       GST_LOG_OBJECT (mq, "Queue %d is empty", oq->id);
++	  oq_is_empty = TRUE;
+       if (IS_FILLED (sq, visible, size.visible)) {
+         sq->max_size.visible = size.visible + 1;
+         GST_DEBUG_OBJECT (mq,
+@@ -1788,6 +1790,12 @@ single_queue_overrun_cb (GstDataQueue * dq, GstSingleQueue * sq)
+             sq->id, sq->max_size.visible);
+       }
+     }
++	else if(oq->id == sq->id)
++      oq_is_empty = TRUE;
++    else
++      oq_is_empty = FALSE;
++
++    all_is_empty = all_is_empty && oq_is_empty;
+     /* check if we reached the hard time/bytes limits */
+     gst_data_queue_get_level (oq->queue, &ssize);
+ 
+@@ -1812,6 +1820,13 @@ single_queue_overrun_cb (GstDataQueue * dq, GstSingleQueue * sq)
+     }
+   }
+   /* no queues were empty */
++  /*Change by adam Zhu, to fix the issue that play some video with WMV format has no sound. */
++  if (all_is_empty && IS_FILLED (sq, bytes, size.bytes)){
++       sq->max_size.bytes = size.bytes + 1;
++      GST_DEBUG_OBJECT (mq,
++            "All other queues are empty, bumping single queue %d max bytes to %d",
++            sq->id, sq->max_size.bytes);
++    }
+   GST_MULTI_QUEUE_MUTEX_UNLOCK (mq);
+ 
+   /* Overrun is always forwarded, since this is blocking the upstream element */

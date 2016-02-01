@@ -1,0 +1,1 @@
+sources/meta-via-bsp/tools/via-setup-release.sh
